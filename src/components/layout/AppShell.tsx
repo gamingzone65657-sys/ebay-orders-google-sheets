@@ -103,6 +103,14 @@ export function AppShell({
             </div>
           </div>
 
+          {/* Public page, reachable without a session — eBay and Google both
+              require the policy to be readable by anyone. */}
+          <Link
+            href="/privacy-policy"
+            className="mt-1 block px-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Privacy Policy
+          </Link>
         </div>
       </aside>
 

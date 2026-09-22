@@ -39,10 +39,33 @@ function arg(name: string): string | undefined {
 }
 
 async function main() {
+  const target = arg("url");
+
+  // Which endpoint string goes into the hash.
+  //
+  // It must be the URL registered with eBay, which — when checking a remote
+  // deployment — is the URL being called, NOT whatever the local .env happens
+  // to say. Hashing the local value while calling a remote server compares two
+  // different configurations and always reports a mismatch, which is exactly
+  // the false alarm this tool is supposed to prevent.
   const { config, problem } = readDeletionConfig();
 
-  if (problem) {
-    console.error(`\n  ✗ ${problem.code}\n    ${problem.message}\n`);
+  const endpointUrl =
+    arg("endpoint") ?? (target ? target.split("?")[0] : config?.endpointUrl);
+
+  // --token lets a remote deployment be checked without mirroring its token
+  // locally. Falls back to the local one for checking a local server.
+  const verificationToken = arg("token") ?? config?.verificationToken;
+
+  if (!endpointUrl || !verificationToken) {
+    const detail = problem
+      ? `${problem.code}: ${problem.message}`
+      : "No endpoint or token available.";
+    console.error(
+      `\n  ✗ ${detail}\n\n` +
+        "    Pass --token and --endpoint to check a deployment whose\n" +
+        "    configuration differs from this machine's .env.\n",
+    );
     process.exitCode = 1;
     return;
   }
@@ -52,24 +75,28 @@ async function main() {
 
   const expected = computeChallengeResponse(
     challengeCode,
-    config.verificationToken,
-    config.endpointUrl,
+    verificationToken,
+    endpointUrl,
   );
 
+  const endpointSource = arg("endpoint")
+    ? "--endpoint"
+    : target
+      ? "derived from --url"
+      : ".env";
+  const tokenSource = arg("token") ? "--token" : ".env";
+
   console.log("\n  eBay account-deletion challenge\n");
-  console.log(`    endpoint        ${config.endpointUrl}`);
+  console.log(`    endpoint        ${endpointUrl}   (${endpointSource})`);
   console.log(
-    `    token           ${config.verificationToken.length} characters (not shown)`,
+    `    token           ${verificationToken.length} characters, not shown   (${tokenSource})`,
   );
   console.log(`    challenge_code  ${challengeCode}`);
   console.log(`    expected hash   ${expected}`);
 
   // The endpoint URL is hashed, so a value eBay cannot reach still produces a
   // hash — it just never matches. Say so rather than letting it look fine.
-  const endpointWarning = describeEndpointProblem(
-    config.endpointUrl,
-    "production",
-  );
+  const endpointWarning = describeEndpointProblem(endpointUrl, "production");
   if (endpointWarning) {
     console.log(`\n    ! ${endpointWarning}`);
     console.log(
@@ -77,7 +104,6 @@ async function main() {
     );
   }
 
-  const target = arg("url");
   if (!target) {
     console.log(
       "\n  Pass --url <endpoint> to call a running server and compare.\n",
