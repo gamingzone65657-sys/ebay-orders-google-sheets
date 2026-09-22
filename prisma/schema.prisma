@@ -1,0 +1,907 @@
+// ============================================================================
+// eBay Order -> Google Sheets Automation Tool
+// Phase 1 data model
+// ----------------------------------------------------------------------------
+// Design rules that this schema deliberately follows:
+//
+//  1. No eBay field is ever a column. Source fields are stored as *string keys*
+//     (e.g. "order.buyer.username") in FieldMapping.sourceField. The catalogue
+//     of available keys lives in src/lib/ebay-fields.ts, not in the database,
+//     so new eBay fields require zero migrations.
+//
+//  2. No Google Sheet column is ever a column. Target columns are rows in
+//     SheetColumn / FieldMapping.targetColumn. A user can map to any header.
+//
+//  3. Raw API payloads are kept verbatim (ImportedOrder.rawPayload) so that a
+//     mapping added later can be re-applied to orders already imported.
+//
+//  4. SQLite (Phase 1 dev database) supports neither `enum` nor `Json`, so
+//     enum-ish columns are String + a constant union in src/lib/constants.ts,
+//     and JSON blobs are String columns suffixed `...Json` read/written through
+//     the helpers in src/lib/json.ts. Both port unchanged to Postgres.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity  (authentication-ready: credentials or OAuth can be layered on top
+// without reshaping anything below)
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  passwordHash String? // null while Phase 1 runs in single-user mode
+  imageUrl     String?
+  role         String    @default("owner") // see USER_ROLES
+  timezone     String    @default("UTC")
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions           Session[]
+  ebayConnections    EbayConnection[]
+  googleConnections  GoogleConnection[]
+  sheetConfigs       GoogleSheetConfig[]
+  savedConfigs       SavedConfiguration[]
+  orders             ImportedOrder[]
+  syncJobs           SyncJob[]
+  automationSettings AutomationSetting?
+  preferences        UserPreference[]
+
+  @@index([email])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  tokenHash    String   @unique
+  userAgent    String?
+  ipAddress    String?
+  expiresAt    DateTime
+  lastActiveAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Free-form per-user settings (Settings page). Key/value so new toggles never
+/// need a migration.
+model UserPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// External connections
+// ---------------------------------------------------------------------------
+
+model EbayConnection {
+  id          String  @id @default(cuid())
+  userId      String
+  /// PRODUCTION | SANDBOX
+  environment String  @default("SANDBOX")
+  /// DISCONNECTED | CONNECTED | EXPIRED | ERROR  (see CONNECTION_STATUS)
+  status      String  @default("DISCONNECTED")
+  isActive    Boolean @default(true)
+
+  /// eBay account identifiers, populated by the OAuth callback in Phase 2.
+  ebayUserId    String?
+  ebayUsername  String?
+  marketplaceId String? @default("EBAY_US")
+
+  /// Tokens are AES-256-GCM encrypted at rest (src/lib/crypto.ts). They are
+  /// never selected into a client component or returned by an API route.
+  accessToken      String?
+  refreshToken     String?
+  tokenType        String?   @default("User Access Token")
+  tokenExpiresAt   DateTime?
+  refreshExpiresAt DateTime?
+  /// space-separated OAuth scopes granted
+  scopes           String?
+
+  /// API observability, surfaced on the dashboard and settings pages.
+  lastApiRequestAt DateTime?
+  lastApiSuccessAt DateTime?
+  lastApiPath      String?
+  lastApiStatus    Int?
+  lastRefreshedAt  DateTime?
+  /// Set while eBay is returning 429; requests short-circuit until it passes.
+  rateLimitedUntil DateTime?
+
+  lastError     String?
+  lastErrorCode String?
+  lastErrorAt   DateTime?
+  lastCheckedAt DateTime?
+  connectedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  syncJobs SyncJob[]
+  apiCalls EbayApiCall[]
+  orders   ImportedOrder[]
+
+  @@index([userId])
+  @@index([userId, isActive])
+}
+
+/// One row per outbound eBay HTTP request (including retries). Backs the
+/// "last successful API request" readouts and makes rate-limit incidents
+/// diagnosable after the fact. Trimmed to a rolling window on write.
+model EbayApiCall {
+  id           String @id @default(cuid())
+  connectionId String
+
+  method       String  @default("GET")
+  path         String
+  status       Int?
+  ok           Boolean @default(false)
+  durationMs   Int?
+  attempt      Int     @default(1)
+  /// Machine-readable category from src/lib/ebay/errors.ts
+  errorCode    String?
+  errorMessage String?
+  /// eBay's own errorId when the body carries one.
+  ebayErrorId  Int?
+
+  createdAt DateTime @default(now())
+
+  connection EbayConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, createdAt])
+  @@index([connectionId, ok])
+}
+
+model GoogleConnection {
+  id       String  @id @default(cuid())
+  userId   String
+  /// DISCONNECTED | CONNECTED | EXPIRED | ERROR
+  status   String  @default("DISCONNECTED")
+  isActive Boolean @default(true)
+
+  googleUserId String?
+  email        String?
+  displayName  String?
+  avatarUrl    String?
+
+  /// AES-256-GCM encrypted at rest (src/lib/crypto.ts), same as eBay's.
+  /// Never selected into a client component or returned by an API route.
+  accessToken    String?
+  refreshToken   String?
+  tokenType      String?   @default("Bearer")
+  tokenExpiresAt DateTime?
+  /// Space-separated scopes Google actually granted, which can be narrower
+  /// than what was requested if the user unticked a checkbox on the consent
+  /// screen. Checked before any call that needs a particular scope.
+  scopes         String?
+
+  /// API observability, mirroring EbayConnection.
+  lastApiRequestAt DateTime?
+  lastApiSuccessAt DateTime?
+  lastApiPath      String?
+  lastApiStatus    Int?
+  lastRefreshedAt  DateTime?
+  rateLimitedUntil DateTime?
+
+  lastError     String?
+  lastErrorCode String?
+  lastErrorAt   DateTime?
+  lastCheckedAt DateTime?
+  connectedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sheetConfigs GoogleSheetConfig[]
+  apiCalls     GoogleApiCall[]
+
+  @@index([userId])
+  @@index([userId, isActive])
+}
+
+/// One row per outbound Google request, including retries. Same purpose as
+/// EbayApiCall: makes quota and permission problems diagnosable afterwards.
+model GoogleApiCall {
+  id           String @id @default(cuid())
+  connectionId String
+
+  method       String  @default("GET")
+  path         String
+  status       Int?
+  ok           Boolean @default(false)
+  durationMs   Int?
+  attempt      Int     @default(1)
+  errorCode    String?
+  errorMessage String?
+  /// Google's own reason string, e.g. "rateLimitExceeded", "notFound".
+  googleReason String?
+
+  createdAt DateTime @default(now())
+
+  connection GoogleConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, createdAt])
+  @@index([connectionId, ok])
+}
+
+// ---------------------------------------------------------------------------
+// Google Sheet target
+// ---------------------------------------------------------------------------
+
+model GoogleSheetConfig {
+  id                 String  @id @default(cuid())
+  userId             String
+  googleConnectionId String?
+
+  spreadsheetId   String
+  spreadsheetName String
+  spreadsheetUrl  String?
+  /// Tab name within the spreadsheet, e.g. "Orders"
+  sheetName       String  @default("Sheet1")
+  /// Numeric tab id returned by the Sheets API
+  sheetGid        String?
+
+  /// 1-based row that holds the column headers.
+  headerRow    Int     @default(1)
+  /// 1-based row where data starts.
+  firstDataRow Int     @default(2)
+  /// APPEND | UPSERT | OVERWRITE  (see WRITE_MODES)
+  writeMode    String  @default("UPSERT")
+  /// Column header used to match an existing row when writeMode = UPSERT.
+  /// Stored as a header string, never as a hardcoded column letter.
+  matchColumn  String?
+
+  /// ORDER (one row per order) | LINE_ITEM (one row per line item).
+  /// See ROW_MODES.
+  rowMode  String @default("ORDER")
+  /// APPEND | UPDATE | APPEND_UPDATE — what a sync is allowed to do.
+  /// See SYNC_MODES.
+  syncMode String @default("APPEND_UPDATE")
+
+  /// Upper bound of the last successful sheet sync, used by the
+  /// "since last successful sync" date range.
+  lastSyncedThrough   DateTime?
+  /// Set once the user has confirmed a bulk sync for this destination.
+  /// Until then the UI requires an explicit preview + confirm.
+  bulkSyncConfirmedAt DateTime?
+
+  /// Grid size reported by the Sheets API for this tab. Used to warn before
+  /// a mapping would write outside the sheet's existing columns.
+  gridRowCount    Int?
+  gridColumnCount Int?
+  frozenRowCount  Int?
+
+  /// Result of the last "Test worksheet" run, surfaced on the config page.
+  lastTestAt      DateTime?
+  lastTestOk      Boolean?
+  lastTestMessage String?
+
+  isActive       Boolean   @default(true)
+  /// When the header row was last read from the live sheet.
+  lastDetectedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleConnection GoogleConnection? @relation(fields: [googleConnectionId], references: [id], onDelete: SetNull)
+  columns          SheetColumn[]
+  fieldMappings    FieldMapping[]
+  syncJobs         SyncJob[]
+  orders           ImportedOrder[]
+  rowLinks         SheetRowLink[]
+  filter           SyncFilter?
+  rules            SyncRule[]
+
+  @@unique([userId, spreadsheetId, sheetName])
+  @@index([userId])
+}
+
+/// Which orders a sync is allowed to touch.
+///
+/// Every selection is stored as a comma-separated list of tokens rather than
+/// a column per option, so adding a new status or marketplace is a constants
+/// change in code and a checkbox in the UI — never a migration.
+/// An empty/null list means "no restriction", which is why "All" needs no
+/// token of its own.
+model SyncFilter {
+  id            String @id @default(cuid())
+  sheetConfigId String @unique
+
+  /// PAID | AWAITING_PAYMENT | SHIPPED | COMPLETED | CANCELLED
+  orderStates       String?
+  /// UNFULFILLED | PARTIALLY_FULFILLED | FULFILLED
+  fulfillmentStates String?
+  /// eBay marketplace ids, e.g. "EBAY_US,EBAY_GB"
+  marketplaces      String?
+
+  /// ALL | INCLUDE | EXCLUDE | CONTAINS | STARTS_WITH | ENDS_WITH
+  skuMode          String  @default("ALL")
+  /// Newline- or comma-separated SKUs / fragments the mode applies to.
+  skuValues        String?
+  skuCaseSensitive Boolean @default(false)
+
+  /// Optional hard bounds, independent of the range chosen at sync time.
+  dateFrom DateTime?
+  dateTo   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sheetConfig GoogleSheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+}
+
+/// A user-defined IF/THEN rule evaluated per row.
+///
+/// Conditions and action arguments are JSON so the vocabulary can grow
+/// without migrations; the readable catalogues live in
+/// src/lib/sync/rules.ts.
+model SyncRule {
+  id            String  @id @default(cuid())
+  sheetConfigId String
+  name          String
+  enabled       Boolean @default(true)
+  position      Int
+
+  /// ALL (every condition must match) | ANY (at least one)
+  match          String @default("ALL")
+  /// [{ field, operator, value }]
+  conditionsJson String @default("[]")
+
+  /// EXCLUDE | INCLUDE_ONLY | SET_VALUE | USE_MAPPING_SET
+  action         String
+  /// { column, value } for SET_VALUE; { savedConfigId } for USE_MAPPING_SET
+  actionArgsJson String?
+
+  /// Rolling count of rows this rule affected, shown in the UI so a rule
+  /// that silently matches nothing is visible.
+  lastMatchCount  Int       @default(0)
+  lastEvaluatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sheetConfig GoogleSheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+
+  @@index([sheetConfigId, position])
+}
+
+/// A mutex guaranteeing one sync at a time per workspace.
+///
+/// The primary key *is* the lock: `create` succeeds for exactly one caller
+/// and fails for every other, and the database decides which. That is
+/// unambiguous in a way that comparing timestamps after the fact is not —
+/// two callers can each claim their own job row and then disagree about who
+/// was first, whereas only one row can ever own this key.
+///
+/// A crashed holder is released by the heartbeat going stale.
+model SyncLock {
+  userId      String   @id
+  jobId       String
+  workerId    String
+  acquiredAt  DateTime @default(now())
+  heartbeatAt DateTime @default(now())
+}
+
+/// Which spreadsheet row holds which order (or line item).
+///
+/// This is the duplicate guard. Before writing anything the engine reads the
+/// key column out of the sheet and reconciles it with these rows, so an order
+/// that already has a row is *updated in place* and never appended twice —
+/// even if this table is empty (a fresh database against an existing sheet)
+/// or stale (rows moved by hand).
+model SheetRowLink {
+  id            String @id @default(cuid())
+  sheetConfigId String
+
+  /// The value written into the key column: the eBay order id in ORDER mode,
+  /// or "<orderId>::<lineItemId>" in LINE_ITEM mode.
+  dedupeKey String
+  /// 1-based spreadsheet row.
+  rowNumber Int
+
+  orderId    String?
+  lineItemId String?
+
+  /// Hash of the last values written, so an unchanged row can be skipped
+  /// instead of burning an API call.
+  valuesHash    String?
+  lastWrittenAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  sheetConfig GoogleSheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([sheetConfigId, dedupeKey])
+  @@index([sheetConfigId, rowNumber])
+}
+
+/// Columns discovered in the destination sheet. Rows here are *data*, which is
+/// what keeps the eventual sheet layout out of the code.
+model SheetColumn {
+  id            String @id @default(cuid())
+  sheetConfigId String
+
+  /// Header text exactly as it appears in the sheet.
+  header   String
+  /// A, B, C ... resolved from position; nullable until detection runs.
+  letter   String?
+  /// 0-based position in the header row.
+  position Int
+  /// Optional hint used by the mapping UI: text | number | date | currency | boolean
+  dataType String  @default("text")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sheetConfig GoogleSheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([sheetConfigId, header])
+  @@index([sheetConfigId, position])
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic field mapping
+// ---------------------------------------------------------------------------
+
+model FieldMapping {
+  id            String  @id @default(cuid())
+  sheetConfigId String
+  /// Set when the mapping belongs to a saved preset rather than the live config.
+  savedConfigId String?
+
+  /// Destination: the sheet header text. Free-form on purpose.
+  targetColumn String
+  /// Source: a dot-path key from the eBay field catalogue, e.g.
+  /// "order.buyer.username" or "lineItem.sku". Free-form on purpose.
+  sourceField  String
+
+  /// Transformation id from the registry in src/lib/transformations.ts
+  /// ("none", "date_format", "currency", ...).
+  transformation    String  @default("none")
+  /// JSON object of transformation arguments, e.g. {"pattern":"yyyy-MM-dd"}.
+  transformArgsJson String?
+
+  /// Written when the source value resolves to null/empty.
+  fallbackValue String?
+  /// Literal value written instead of a source field (sourceField = "static").
+  staticValue   String?
+
+  enabled  Boolean @default(true)
+  /// Display + write order. Contiguous per sheetConfig, maintained by the API.
+  position Int
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sheetConfig GoogleSheetConfig   @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+  savedConfig SavedConfiguration? @relation(fields: [savedConfigId], references: [id], onDelete: Cascade)
+
+  @@index([sheetConfigId, position])
+  @@index([savedConfigId])
+}
+
+/// A reusable, named snapshot of a mapping set (+ sheet options). Lets a user
+/// keep e.g. "Accounting export" and "Warehouse picklist" side by side.
+model SavedConfiguration {
+  id          String  @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  /// Serialised snapshot: { sheet: {...}, mappings: [...] }
+  payloadJson String
+  isDefault   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mappings FieldMapping[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Imported orders
+// ---------------------------------------------------------------------------
+
+model ImportedOrder {
+  id               String  @id @default(cuid())
+  userId           String
+  sheetConfigId    String?
+  ebayConnectionId String?
+
+  /// Always "EBAY": every order is retrieved from the eBay production API.
+  /// Kept as a column so a second source could be added without a migration.
+  source String @default("EBAY")
+
+  /// eBay's order id — unique per user, the natural dedupe key.
+  ebayOrderId    String
+  legacyOrderId  String?
+  /// Seller's own sales record number, when eBay returns one.
+  salesRecordRef String?
+  marketplaceId  String?
+
+  orderDate    DateTime
+  lastModified DateTime?
+
+  buyerUsername String?
+  buyerName     String?
+  buyerEmail    String?
+  buyerPhone    String?
+
+  /// Denormalised roll-ups for fast list/filter rendering. The authoritative
+  /// values always live in rawPayload + lineItems.
+  itemCount     Int    @default(0)
+  totalQuantity Int    @default(0)
+  totalAmount   Float  @default(0)
+  currency      String @default("USD")
+
+  /// Money breakdown. Nullable because eBay omits absent components.
+  subtotalAmount Float?
+  shippingCost   Float?
+  taxAmount      Float?
+  discountAmount Float?
+
+  /// ACTIVE | COMPLETED | CANCELLED ... (eBay vocabulary kept as plain strings)
+  orderStatus       String  @default("ACTIVE")
+  paymentStatus     String?
+  fulfillmentStatus String?
+  cancelStatus      String?
+  /// Comma-separated payment method codes eBay reported for this order.
+  paymentMethods    String?
+
+  /// Convenience copies of the first fulfillment; full set lives in
+  /// OrderFulfillment because one order can ship in several parcels.
+  trackingNumber  String?
+  shippingCarrier String?
+  shippedAt       DateTime?
+
+  shippingServiceCode String?
+  shipByDate          DateTime?
+  minDeliveryDate     DateTime?
+  maxDeliveryDate     DateTime?
+
+  shipToName    String?
+  shipToLine1   String?
+  shipToLine2   String?
+  shipToCity    String?
+  shipToState   String?
+  shipToCountry String?
+  shipToPostal  String?
+  shipToPhone   String?
+
+  /// PENDING | SYNCED | SKIPPED | FAILED  (see ORDER_SYNC_STATE)
+  syncState      String    @default("PENDING")
+  syncError      String?
+  lastSyncedAt   DateTime?
+  /// The run that last touched this order, so order-level history can link
+  /// straight to it without scanning SyncOrderResult.
+  lastSyncJobId  String?
+  /// Row number this order occupies in the sheet, for UPSERT writes.
+  sheetRowNumber Int?
+
+  /// Verbatim eBay payload, so mappings added later can be re-applied.
+  rawPayloadJson String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sheetConfig    GoogleSheetConfig? @relation(fields: [sheetConfigId], references: [id], onDelete: SetNull)
+  ebayConnection EbayConnection?    @relation(fields: [ebayConnectionId], references: [id], onDelete: SetNull)
+  lineItems      OrderLineItem[]
+  fulfillments   OrderFulfillment[]
+  logs           SyncLog[]
+  syncResults    SyncOrderResult[]
+
+  @@unique([userId, ebayOrderId])
+  @@index([userId, orderDate])
+  @@index([userId, syncState])
+  @@index([userId, orderStatus])
+  @@index([userId, marketplaceId])
+  @@index([userId, source])
+}
+
+/// A shipment against an order. eBay returns these from
+/// /sell/fulfillment/v1/order/{id}/shipping_fulfillment, and one order can
+/// have several.
+model OrderFulfillment {
+  id      String @id @default(cuid())
+  orderId String
+
+  ebayFulfillmentId   String?
+  trackingNumber      String?
+  shippingCarrierCode String?
+  shippingServiceCode String?
+  shippedDate         DateTime?
+
+  rawPayloadJson String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order ImportedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, ebayFulfillmentId])
+  @@index([orderId])
+}
+
+model OrderLineItem {
+  id      String @id @default(cuid())
+  orderId String
+
+  ebayLineItemId String?
+  legacyItemId   String?
+  sku            String?
+  title          String
+  quantity       Int     @default(1)
+  unitPrice      Float   @default(0)
+  currency       String  @default("USD")
+  variation      String?
+  imageUrl       String?
+
+  /// Per-line money, all nullable because eBay omits absent components.
+  lineItemTotal  Float?
+  taxAmount      Float?
+  deliveryCost   Float?
+  discountAmount Float?
+
+  fulfillmentStatus    String?
+  listingMarketplaceId String?
+  soldFormat           String?
+
+  /// Row this line item occupies when the sheet is in LINE_ITEM mode.
+  sheetRowNumber Int?
+
+  rawPayloadJson String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order ImportedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([sku])
+}
+
+// ---------------------------------------------------------------------------
+// Sync execution
+// ---------------------------------------------------------------------------
+
+model SyncJob {
+  id               String  @id @default(cuid())
+  userId           String
+  ebayConnectionId String?
+  sheetConfigId    String?
+
+  /// IMPORT (eBay -> database) | SHEET_SYNC (database -> Sheets, Phase 3)
+  kind    String  @default("IMPORT")
+  /// MANUAL | SCHEDULED | WEBHOOK  (see SYNC_TRIGGERS)
+  trigger String  @default("MANUAL")
+  /// QUEUED | RUNNING | SUCCESS | PARTIAL | FAILED | CANCELLED
+  status  String  @default("QUEUED")
+
+  ordersFetched  Int @default(0)
+  ordersImported Int @default(0)
+  ordersUpdated  Int @default(0)
+  ordersSkipped  Int @default(0)
+  errorCount     Int @default(0)
+
+  /// eBay pagination + request accounting for this run.
+  pagesFetched Int @default(0)
+  apiCallCount Int @default(0)
+
+  /// Sheet-write outcomes, kept separate from the order counters above
+  /// because one order can produce several rows in LINE_ITEM mode.
+  rowsInserted Int @default(0)
+  rowsUpdated  Int @default(0)
+  rowsSkipped  Int @default(0)
+  rowsFailed   Int @default(0)
+
+  /// Live progress, polled by the UI while the run is in flight.
+  /// QUEUED | FETCHING | PROCESSING | WRITING | COMPLETED | FAILED
+  phase           String  @default("QUEUED")
+  progressCurrent Int     @default(0)
+  progressTotal   Int     @default(0)
+  progressLabel   String?
+
+  /// --- Durable queue bookkeeping ----------------------------------------
+  /// A job is claimed by exactly one worker via a compare-and-swap on
+  /// `status`, which is what makes two workers (or two overlapping ticks)
+  /// safe. `heartbeatAt` lets a crashed worker's job be reclaimed rather
+  /// than sitting RUNNING forever.
+  lockedBy    String?
+  lockedAt    DateTime?
+  heartbeatAt DateTime?
+
+  /// Attempt number, 1-based. Only transient failures are retried.
+  attempt       Int       @default(1)
+  maxAttempts   Int       @default(3)
+  /// When a retry becomes eligible; null means "as soon as possible".
+  nextAttemptAt DateTime?
+  /// When this job was meant to run, for scheduled work.
+  scheduledFor  DateTime?
+  /// Set when a failure is classified as worth retrying.
+  retryable     Boolean   @default(false)
+  /// Machine-readable failure category, e.g. RATE_LIMITED.
+  errorCode     String?
+
+  /// Guards against enqueuing the same scheduled slot twice.
+  dedupeKey String?
+
+  /// Window of eBay order dates this run covered.
+  windowStart DateTime?
+  windowEnd   DateTime?
+
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  durationMs   Int?
+  summary      String?
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ebayConnection EbayConnection?    @relation(fields: [ebayConnectionId], references: [id], onDelete: SetNull)
+  sheetConfig    GoogleSheetConfig? @relation(fields: [sheetConfigId], references: [id], onDelete: SetNull)
+  logs           SyncLog[]
+  orderResults   SyncOrderResult[]
+
+  @@unique([dedupeKey])
+  @@index([status, nextAttemptAt])
+  @@index([userId, startedAt])
+  @@index([userId, status])
+}
+
+/// What one run did to one order (ORDER mode) or one line item (LINE_ITEM
+/// mode).
+///
+/// SyncJob holds the totals and SyncLog holds the narrative; neither can
+/// answer "which orders failed, at which step, and can I retry just those?".
+/// That question is the whole point of this table, so each row is the unit a
+/// retry operates on: one row in the sheet.
+///
+/// Kept even when the run succeeded, because the skipped and updated rows are
+/// what make a surprising total explainable afterwards.
+model SyncOrderResult {
+  id        String  @id @default(cuid())
+  syncJobId String
+  /// Null once the underlying order is deleted; ebayOrderId still identifies it.
+  orderId   String?
+
+  /// Denormalised so the history survives the order being removed.
+  ebayOrderId String
+  lineItemId  String?
+  /// The sheet key this unit owns: order id, or "<orderId>::<lineItemId>".
+  dedupeKey   String
+
+  /// INSERTED | UPDATED | SKIPPED | FAILED  (see SYNC_OUTCOMES)
+  outcome   String
+  /// Step this unit reached: map | dedupe | sheet.write | sync.mode
+  operation String  @default("sheet.write")
+  /// Why it was skipped, or what the failure said. Never carries a token or
+  /// credential: failures are described through the error catalogues, which
+  /// only ever produce operator-facing text.
+  reason    String?
+  errorCode String?
+
+  /// 1-based spreadsheet row this unit targeted.
+  rowNumber Int?
+
+  /// Which attempt this was for this unit, incremented by a retry.
+  attempt Int @default(1)
+
+  /// Set when a later run or a targeted retry fixed this unit, so a resolved
+  /// failure stops demanding attention without disappearing from the record.
+  resolvedAt      DateTime?
+  resolvedByJobId String?
+
+  createdAt DateTime @default(now())
+
+  syncJob SyncJob        @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+  order   ImportedOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  /// One row per unit per run: a retry creates a new job, not a second row.
+  @@unique([syncJobId, dedupeKey])
+  @@index([syncJobId, outcome])
+  @@index([orderId, createdAt])
+  @@index([outcome, resolvedAt])
+}
+
+model SyncLog {
+  id        String  @id @default(cuid())
+  syncJobId String
+  orderId   String?
+
+  /// DEBUG | INFO | WARN | ERROR
+  level       String  @default("INFO")
+  /// Short machine-readable step id, e.g. "fetch.orders", "sheet.write"
+  step        String  @default("general")
+  message     String
+  /// Arbitrary structured context.
+  contextJson String?
+
+  createdAt DateTime @default(now())
+
+  syncJob SyncJob        @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+  order   ImportedOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([syncJobId, createdAt])
+  @@index([level])
+}
+
+// ---------------------------------------------------------------------------
+// Automation
+// ---------------------------------------------------------------------------
+
+model AutomationSetting {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  enabled         Boolean @default(false)
+  /// Minutes between scheduled runs. Ignored when cronExpression is set.
+  intervalMinutes Int     @default(60)
+  cronExpression  String?
+  timezone        String  @default("UTC")
+
+  /// How far back each scheduled run looks for eBay orders.
+  lookbackDays   Int  @default(7)
+  /// Optional quiet hours, 0-23. Null = run all day.
+  activeFromHour Int?
+  activeToHour   Int?
+
+  /// Only sync orders in these statuses. Comma-separated, free-form strings.
+  orderStatusFilter String?
+
+  retryLimit       Int @default(3)
+  retryBackoffSecs Int @default(60)
+
+  notifyOnError   Boolean @default(true)
+  notifyOnSuccess Boolean @default(false)
+  notifyEmail     String?
+
+  /// Any run, successful or not.
+  lastRunAt DateTime?
+  nextRunAt DateTime?
+
+  /// Success and failure are tracked separately and explicitly: a failed run
+  /// must never be able to look like a successful one, and the incremental
+  /// cursor may only advance on success.
+  lastSuccessAt       DateTime?
+  lastSuccessJobId    String?
+  lastFailureAt       DateTime?
+  lastFailureJobId    String?
+  lastFailureReason   String?
+  lastFailureCode     String?
+  consecutiveFailures Int       @default(0)
+
+  /// Set when repeated failures have suspended the schedule, so the app
+  /// stops hammering an integration that is definitively broken.
+  disabledReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

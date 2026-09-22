@@ -1,0 +1,284 @@
+@import "tailwindcss";
+
+/**
+ * Theming.
+ *
+ * Tailwind v4's `dark:` variant defaults to `prefers-color-scheme`, which
+ * cannot be overridden by a user toggle. This switches it to a class on
+ * <html>, so the toggle wins and the OS preference is only the initial
+ * default (applied by the inline script in layout.tsx).
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+ * Semantic tokens.
+ *
+ * Every colour the UI uses is named for its role, not its hue, and is
+ * redefined under `.dark`. Components reference the role — `bg-card`,
+ * `text-muted-foreground` — so a theme change is a variable change here
+ * rather than an edit in forty components.
+ * ------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  --background: #f6f7f9;
+  --foreground: #101828;
+
+  --card: #ffffff;
+  --card-foreground: #101828;
+
+  /* Quiet secondary surface: table headers, inset panels, hover states. */
+  --muted: #f1f5f9;
+  --muted-foreground: #667085;
+
+  --border: #e4e7ec;
+  /* Slightly stronger than --border: form controls need a visible edge. */
+  --input: #cbd5e1;
+  --ring: #2563eb;
+
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-foreground: #ffffff;
+
+  --secondary: #ffffff;
+  --secondary-foreground: #334155;
+  --secondary-hover: #f8fafc;
+
+  --accent: #eff6ff;
+  --accent-foreground: #1d4ed8;
+
+  /* Inline links. Kept separate from --primary because a button background
+   * and link text have opposite contrast requirements once dark. */
+  --link: #2563eb;
+  --link-hover: #1d4ed8;
+
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+
+  /* Status roles. Each is a text colour, a tinted surface and a border, so
+   * badges, notices and inline text stay consistent across both themes. */
+  --success: #047857;
+  --success-bg: #ecfdf5;
+  --success-border: #a7f3d0;
+
+  --warning: #b45309;
+  --warning-bg: #fffbeb;
+  --warning-border: #fde68a;
+
+  --danger: #b42318;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+
+  --info: #1d4ed8;
+  --info-bg: #eff6ff;
+  --info-border: #bfdbfe;
+
+  --scrollbar-thumb: #cbd5e1;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* Not pure black: a slightly blue-tinted near-black reads as a designed
+   * surface rather than an absence of one, and keeps card elevation legible. */
+  --background: #0b1220;
+  --foreground: #e6edf7;
+
+  --card: #111a2b;
+  --card-foreground: #e6edf7;
+
+  --muted: #1a2438;
+  --muted-foreground: #94a3b8;
+
+  --border: #253048;
+  --input: #3b4a63;
+  --ring: #60a5fa;
+
+  /* Kept at blue-600 rather than lightened: white-on-blue-500 fails AA at
+   * body sizes, and buttons must stay readable, not merely vivid. */
+  --primary: #2563eb;
+  --primary-hover: #3b82f6;
+  --primary-foreground: #ffffff;
+
+  --secondary: #1a2438;
+  --secondary-foreground: #cbd5e1;
+  --secondary-hover: #222e46;
+
+  --accent: #17233a;
+  --accent-foreground: #93c5fd;
+
+  --link: #93c5fd;
+  --link-hover: #bfdbfe;
+
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+
+  /* Dark status surfaces are translucent tints of the hue rather than solid
+   * pastels, so they sit on the card colour without looking pasted on. */
+  --success: #6ee7b7;
+  --success-bg: rgba(16, 185, 129, 0.12);
+  --success-border: rgba(16, 185, 129, 0.32);
+
+  --warning: #fcd34d;
+  --warning-bg: rgba(245, 158, 11, 0.12);
+  --warning-border: rgba(245, 158, 11, 0.32);
+
+  --danger: #fca5a5;
+  --danger-bg: rgba(239, 68, 68, 0.12);
+  --danger-border: rgba(239, 68, 68, 0.34);
+
+  --info: #93c5fd;
+  --info-bg: rgba(59, 130, 246, 0.14);
+  --info-border: rgba(59, 130, 246, 0.34);
+
+  --scrollbar-thumb: #334155;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+/* Registers the tokens as Tailwind utilities. `inline` keeps the var
+ * reference in the generated CSS, so `.dark` overrides apply at runtime
+ * instead of being baked in at build time. */
+@theme inline {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas,
+    monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-hover: var(--secondary-hover);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-link: var(--link);
+  --color-link-hover: var(--link-hover);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-success-border: var(--success-border);
+
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-border: var(--danger-border);
+
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-border: var(--info-border);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A short cross-fade on the surfaces that actually change, rather than a
+ * global `transition: all`, which would also animate hovers and layout. */
+body,
+[data-theme-surface] {
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+/* Suppress that transition during the very first paint and while the toggle
+ * is applying, so switching is instant rather than a visible sweep. */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}
+
+/* Keyboard focus only — avoids a ring on every mouse click. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Consistent, quiet scrollbars for the data tables. */
+.scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.scroll-area::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+.scroll-area::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* Chrome paints autofilled inputs with its own near-white background, which
+ * would punch a light rectangle through a dark form. There is no property to
+ * override it directly, so the background is faked with an inset shadow. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+select:-webkit-autofill {
+  -webkit-text-fill-color: var(--foreground);
+  -webkit-box-shadow: 0 0 0 1000px var(--card) inset;
+  box-shadow: 0 0 0 1000px var(--card) inset;
+  caret-color: var(--foreground);
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* `color-scheme` handles most native chrome, but the date picker indicator
+ * stays a dark glyph on dark backgrounds in Chromium without this. */
+.dark input[type="date"]::-webkit-calendar-picker-indicator,
+.dark input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(1.6);
+  opacity: 0.75;
+}
+
+/* Native search clear button is invisible against a dark field. */
+.dark input[type="search"]::-webkit-search-cancel-button {
+  filter: invert(1) brightness(1.6);
+  opacity: 0.6;
+}
+
+/* Respect reduced-motion for the few transitions that exist. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
