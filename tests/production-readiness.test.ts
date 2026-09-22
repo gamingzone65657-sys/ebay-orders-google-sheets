@@ -397,3 +397,132 @@ describe("data retention", () => {
     assert.equal(second.payloadsCleared, 0, "a second pass must clear nothing");
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* Flag parsing                                                                */
+/* -------------------------------------------------------------------------- */
+
+describe("environment flag reading", () => {
+  let env: typeof import("@/lib/env");
+
+  before(async () => {
+    env = await import("@/lib/env");
+  });
+
+  const read = (value: string | undefined) => env.readFlag("FLAG", { FLAG: value });
+
+  it("accepts the documented spelling", () => {
+    assert.equal(read("true").enabled, true);
+  });
+
+  it("accepts the spellings a hosting dashboard actually produces", () => {
+    // Quotes are the one that bites: a value pasted as "true" in Vercel keeps
+    // the quote characters, and an exact === "true" comparison rejects it.
+    for (const raw of ['"true"', "'true'", " true ", "TRUE", "True", "true\n", "1", "yes", "on"]) {
+      assert.equal(
+        read(raw).enabled,
+        true,
+        `expected ${JSON.stringify(raw)} to enable the flag`,
+      );
+    }
+  });
+
+  it("treats explicit negatives as disabled, not unrecognised", () => {
+    for (const raw of ["false", '"false"', "0", "no", "off", "FALSE"]) {
+      const reading = read(raw);
+      assert.equal(reading.enabled, false, raw);
+      assert.equal(reading.verdict, "disabled", raw);
+    }
+  });
+
+  it("never enables on an unrecognised value", () => {
+    for (const raw of ["maybe", "y", "enable", "tru", "2"]) {
+      assert.equal(read(raw).enabled, false, raw);
+    }
+  });
+
+  it("distinguishes absent from unrecognised, which are different faults", () => {
+    assert.equal(read(undefined).verdict, "absent");
+    assert.equal(read("").verdict, "absent");
+    assert.equal(read("   ").verdict, "absent");
+    assert.equal(read("banana").verdict, "unrecognised");
+  });
+
+  it("explains an absent variable in terms of redeploying", () => {
+    const message = env.describeFlag("SINGLE_USER_MODE", read(undefined));
+    assert.match(message, /not set in this running process/);
+    assert.match(message, /redeploy/i);
+  });
+
+  it("quotes back an unrecognised value so the typo is visible", () => {
+    const message = env.describeFlag("SINGLE_USER_MODE", read("ture"));
+    assert.match(message, /"ture"/);
+  });
+});
+
+describe("single-user mode gate", () => {
+  let session: typeof import("@/lib/session");
+  const saved = { ...process.env };
+
+  before(async () => {
+    setupTestDatabase("readiness");
+    session = await import("@/lib/session");
+  });
+
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  function production(value: string | undefined) {
+    Object.defineProperty(process.env, "NODE_ENV", {
+      value: "production",
+      configurable: true,
+    });
+    if (value === undefined) delete process.env.SINGLE_USER_MODE;
+    else process.env.SINGLE_USER_MODE = value;
+  }
+
+  it("admits a request for every spelling a dashboard produces", async () => {
+    for (const raw of ["true", '"true"', " true ", "TRUE", "1", "yes"]) {
+      production(raw);
+      const user = await session.getCurrentUser();
+      assert.ok(user.id, `expected ${JSON.stringify(raw)} to allow access`);
+    }
+  });
+
+  it("still refuses when the variable never arrived", async () => {
+    production(undefined);
+    await assert.rejects(
+      () => session.getCurrentUser(),
+      (error: unknown) => error instanceof session.AuthRequiredError,
+    );
+  });
+
+  it("still refuses when it is explicitly disabled", async () => {
+    production("false");
+    await assert.rejects(() => session.getCurrentUser());
+  });
+
+  it("tells the operator what the process actually sees", async () => {
+    production(undefined);
+    await assert.rejects(
+      () => session.getCurrentUser(),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        // The old message just repeated the instruction, which is useless to
+        // someone who has already followed it.
+        assert.match(message, /not set in this running process/);
+        return true;
+      },
+    );
+
+    production("ture");
+    await assert.rejects(
+      () => session.getCurrentUser(),
+      (error: unknown) => {
+        assert.match((error as Error).message, /"ture"/);
+        return true;
+      },
+    );
+  });
+});

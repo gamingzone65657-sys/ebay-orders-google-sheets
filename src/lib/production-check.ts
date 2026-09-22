@@ -7,6 +7,8 @@
  * visible immediately, not at the first OAuth callback.
  */
 
+import { readFlag } from "./env";
+
 const MIN_SECRET_LENGTH = 32;
 
 export type Severity = "blocker" | "warning";
@@ -21,8 +23,10 @@ function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+// Uses the shared reader so the readiness report, the health endpoint and the
+// authentication gate can never disagree about what a flag means.
 function isTrue(value: string | undefined): boolean {
-  return value?.trim().toLowerCase() === "true";
+  return readFlag("flag", { flag: value }).enabled;
 }
 
 export function checkProductionReadiness(): ReadinessFinding[] {

@@ -5,6 +5,7 @@ import { isEbayConfigured, resolveEnvironment } from "@/lib/ebay/config";
 import { isGoogleConfigured, expectedRedirectUri } from "@/lib/google/config";
 import { JOB_HEARTBEAT_TIMEOUT_MS } from "@/lib/constants";
 import { checkProductionReadiness } from "@/lib/production-check";
+import { readFlag } from "@/lib/env";
 import { retentionSettings } from "@/lib/retention";
 
 export const dynamic = "force-dynamic";
@@ -132,6 +133,7 @@ export async function GET(request: Request) {
     }
 
     // --- Configuration ----------------------------------------------------
+    const singleUser = readFlag("SINGLE_USER_MODE");
     const findings = checkProductionReadiness();
     const blockers = findings.filter((f) => f.severity === "blocker");
     const appUrl = process.env.APP_URL?.trim() ?? "";
@@ -161,8 +163,10 @@ export async function GET(request: Request) {
         appUrlIsLocalhost: /localhost|127\.0\.0\.1/i.test(appUrl),
         authSecretConfigured:
           (process.env.AUTH_SECRET ?? "").length >= 32,
-        singleUserMode:
-          process.env.SINGLE_USER_MODE?.trim().toLowerCase() === "true",
+        // verdict distinguishes "never reached the runtime" from "arrived
+        // with a value nobody meant", which is the whole diagnosis.
+        singleUserMode: singleUser.enabled,
+        singleUserModeVerdict: singleUser.verdict,
       },
       worker,
       scheduler,

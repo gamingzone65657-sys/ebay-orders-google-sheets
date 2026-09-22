@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import type { User } from "@prisma/client";
 
 import { prisma } from "./db";
+import { describeFlag, envFlag, readFlag } from "./env";
 
 export const SESSION_COOKIE = "ebs_session";
 
@@ -30,9 +31,11 @@ export class AuthRequiredError extends Error {
   }
 }
 
+export const SINGLE_USER_MODE_VAR = "SINGLE_USER_MODE";
+
 function anonymousFallbackAllowed(): boolean {
   if (process.env.NODE_ENV !== "production") return true;
-  return process.env.SINGLE_USER_MODE?.trim().toLowerCase() === "true";
+  return envFlag(SINGLE_USER_MODE_VAR);
 }
 
 const DEFAULT_USER_EMAIL =
@@ -75,8 +78,13 @@ export async function getCurrentUser(): Promise<User> {
   if (sessionUser) return sessionUser;
 
   if (!anonymousFallbackAllowed()) {
+    // Say what this process actually sees. The previous message told the
+    // operator to set a variable they had very often already set, which left
+    // no way to tell "it never reached the runtime" apart from "it arrived
+    // with quotes around it".
     throw new AuthRequiredError(
-      "This deployment has no sign-in configured. Set SINGLE_USER_MODE=true to run it for one seller on a trusted host, or add authentication before exposing it.",
+      "This deployment has no sign-in configured, and single-user mode is not active. " +
+        describeFlag(SINGLE_USER_MODE_VAR, readFlag(SINGLE_USER_MODE_VAR)),
     );
   }
 
