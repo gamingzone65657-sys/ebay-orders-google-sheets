@@ -10,6 +10,8 @@ import { useApiAction } from "@/components/useApiAction";
 
 export interface EbayPanelProps {
   configured: boolean;
+  /** True when this runs on a hosting platform, where there is no .env. */
+  hosted?: boolean;
   missingVars: string[];
   status: string;
   environment: string;
@@ -27,6 +29,7 @@ interface TestResponse {
 
 export function EbayConnectionPanel({
   configured,
+  hosted = false,
   missingVars,
   status,
   environment,
@@ -67,8 +70,10 @@ export function EbayConnectionPanel({
             <code className="rounded bg-foreground/10 px-1 py-0.5 font-mono text-xs">
               {missingVars.join(", ")}
             </code>{" "}
-            in <code className="font-mono text-xs">.env</code> and restart the
-            server. The values come from your eBay developer account; the RuName
+            {hosted
+              ? "in your hosting provider's environment variables, then redeploy — a deployment only picks up variables that existed when it was created."
+              : "in .env and restart the server."}{" "}
+            The values come from your eBay developer account; the RuName
             must point its redirect at{" "}
             <code className="font-mono text-xs">/api/auth/ebay/callback</code>.
           </p>

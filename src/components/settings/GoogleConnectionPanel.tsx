@@ -9,12 +9,15 @@ import { useApiAction } from "@/components/useApiAction";
 
 export function GoogleConnectionPanel({
   configured,
+  hosted = false,
   missingVars,
   status,
   redirectUri,
   returnTo = "/google-sheet",
 }: {
   configured: boolean;
+  /** True when this runs on a hosting platform, where there is no .env. */
+  hosted?: boolean;
   missingVars: string[];
   status: string;
   /** Shown so it can be pasted into the Cloud console verbatim. */
@@ -47,8 +50,10 @@ export function GoogleConnectionPanel({
             <code className="rounded bg-foreground/10 px-1 py-0.5 font-mono text-xs">
               {missingVars.join(", ")}
             </code>{" "}
-            in <code className="font-mono text-xs">.env</code> and restart. In
-            the Google Cloud console create an{" "}
+            {hosted
+              ? "in your hosting provider's environment variables, then redeploy — a deployment only picks up variables that existed when it was created."
+              : "in .env and restart the server."}{" "}
+            In the Google Cloud console create an{" "}
             <strong>OAuth client ID</strong> of type{" "}
             <strong>Web application</strong>, enable the{" "}
             <strong>Google Sheets API</strong> and{" "}

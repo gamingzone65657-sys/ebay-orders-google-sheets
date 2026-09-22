@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/primitives";
 import { CONNECTION_STATUS } from "@/lib/constants";
 import { prisma } from "@/lib/db";
+import { isHostedDeployment } from "@/lib/env";
 import {
   expectedRedirectUri,
   grantsSheetsWrite,
@@ -211,6 +212,7 @@ export default async function GoogleSheetPage({
 
           <GoogleConnectionPanel
             configured={isGoogleConfigured()}
+            hosted={isHostedDeployment()}
             missingVars={missingGoogleCredentials()}
             status={status}
             redirectUri={expectedRedirectUri()}

@@ -458,6 +458,24 @@ describe("environment flag reading", () => {
     const message = env.describeFlag("SINGLE_USER_MODE", read("ture"));
     assert.match(message, /"ture"/);
   });
+
+  it("recognises a managed host from the marker the platform injects", () => {
+    for (const marker of ["VERCEL", "RENDER", "RAILWAY_ENVIRONMENT", "FLY_APP_NAME", "NETLIFY"]) {
+      assert.equal(
+        env.isHostedDeployment({ [marker]: "1" }),
+        true,
+        `expected ${marker} to mark a hosted deployment`,
+      );
+    }
+  });
+
+  it("does not call a self-hosted production server hosted", () => {
+    // There, "set it in .env and restart" is the correct instruction, so
+    // NODE_ENV alone must not flip the advice.
+    assert.equal(env.isHostedDeployment({ NODE_ENV: "production" }), false);
+    assert.equal(env.isHostedDeployment({}), false);
+    assert.equal(env.isHostedDeployment({ VERCEL: "" }), false);
+  });
 });
 
 describe("single-user mode gate", () => {

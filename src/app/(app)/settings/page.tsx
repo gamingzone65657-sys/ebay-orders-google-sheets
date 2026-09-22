@@ -20,6 +20,7 @@ import {
   Notice,
 } from "@/components/ui/primitives";
 import { prisma } from "@/lib/db";
+import { isHostedDeployment } from "@/lib/env";
 import {
   EBAY_MARKETPLACE_OPTIONS,
   isEbayConfigured,
@@ -296,6 +297,7 @@ export default async function SettingsPage({
 
             <EbayConnectionPanel
               configured={ebayConfigured}
+              hosted={isHostedDeployment()}
               missingVars={missingEbayCredentials()}
               status={ebayStatus}
               environment={ebayConnection?.environment ?? resolveEnvironment()}
@@ -451,6 +453,7 @@ export default async function SettingsPage({
 
             <GoogleConnectionPanel
               configured={isGoogleConfigured()}
+              hosted={isHostedDeployment()}
               missingVars={missingGoogleCredentials()}
               status={googleStatus}
               redirectUri={expectedRedirectUri()}

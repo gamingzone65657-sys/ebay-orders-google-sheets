@@ -80,8 +80,8 @@ const rows = [
 
   ["EBAY_ENVIRONMENT", "PRODUCTION", "Sandbox in production is a startup blocker."],
   ["EBAY_CLIENT_ID", local("EBAY_CLIENT_ID"), "eBay App ID."],
-  ["EBAY_CLIENT_SECRET", local("EBAY_CLIENT_SECRET"), "eBay Cert ID — must be the full 44-character value."],
-  ["EBAY_RU_NAME", local("EBAY_RU_NAME"), "eBay redirects to a RuName, not a URL."],
+  ["EBAY_CLIENT_SECRET", local("EBAY_CLIENT_SECRET"), "eBay Cert ID, copied whole from the developer portal."],
+  ["EBAY_RU_NAME", local("EBAY_RU_NAME"), "eBay redirects to a RuName, not a URL. Without it consent returns no code."],
 
   ["EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN",
    local("EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN"),
@@ -91,7 +91,12 @@ const rows = [
    "Part of the challenge hash — must match eBay exactly."],
 
   ["CRON_SECRET", local("CRON_SECRET") || randomBytes(24).toString("base64url"),
-   "Enables POST /api/jobs/tick for scheduled syncs."],
+   "Enables POST /api/jobs/tick for scheduled syncs, and GET /api/health."],
+
+  ["PRIVACY_OPERATOR_NAME", local("PRIVACY_OPERATOR_NAME"),
+   "Named as the data controller on the public /privacy-policy page."],
+  ["PRIVACY_CONTACT_EMAIL", local("PRIVACY_CONTACT_EMAIL"),
+   "Where privacy and deletion requests go. eBay and Google both expect one."],
 ];
 
 console.log("\n  Paste these into Vercel -> Settings -> Environment Variables");

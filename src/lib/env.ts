@@ -77,6 +77,43 @@ export function envFlag(
 }
 
 /**
+ * Variables the major hosting platforms inject into every build and runtime.
+ * None of them are ours, and none need to be set by hand — their presence is
+ * the signal.
+ */
+const PLATFORM_MARKERS = [
+  "VERCEL", // Vercel
+  "RENDER", // Render
+  "RAILWAY_ENVIRONMENT", // Railway
+  "FLY_APP_NAME", // Fly.io
+  "NETLIFY", // Netlify
+  "DYNO", // Heroku
+  "CF_PAGES", // Cloudflare Pages
+];
+
+/**
+ * Whether this process runs on a managed hosting platform.
+ *
+ * It exists for one reason: telling an operator to "set X in .env and restart
+ * the server" is actively wrong on Vercel, where there is no .env file, no
+ * server to restart, and — the part that costs the most time — variables added
+ * after a deployment was created do not reach it until the next deploy. The
+ * instruction has to change with the environment or it sends people looking
+ * for a file that does not exist.
+ *
+ * A self-hosted production box is deliberately *not* hosted by this
+ * definition: there, .env and a restart is exactly right.
+ */
+export function isHostedDeployment(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return PLATFORM_MARKERS.some((name) => {
+    const value = env[name];
+    return value !== undefined && value.trim() !== "";
+  });
+}
+
+/**
  * One sentence describing what the runtime actually saw, for an error the
  * operator has to act on.
  *
