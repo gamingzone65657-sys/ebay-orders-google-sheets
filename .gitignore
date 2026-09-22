@@ -22,3 +22,7 @@ next-env.d.ts
 !.env.example
 !.env.production.example
 .claude/settings.local.json
+
+# Generated per-environment schema (see scripts/prepare-schema.mjs).
+# The committed prisma/schema.prisma is the production one and is never edited.
+prisma/schema.active.prisma

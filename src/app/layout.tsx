@@ -24,9 +24,22 @@ export default function RootLayout({
     // style attributes legitimately differ from the server-rendered output.
     <html lang="en" suppressHydrationWarning>
       <body className="bg-background text-foreground">
-        {/* First node in <body> so it executes before anything below it is
-            painted. A hand-authored <head> is not preserved by the App
-            Router, and next/script cannot run this early. */}
+        {/*
+          Sets the theme class on <html> before the first paint, so a dark-mode
+          user never sees a white flash. First node in <body>, so it runs
+          before anything below it is painted.
+
+          This must stay a bare <script>. React 19 logs a dev-only warning here
+          ("Scripts inside React components are never executed when rendering
+          on the client"), which is true and harmless: the script only ever
+          needs to run once, on the initial server-rendered document, and it
+          does. The warning does not appear in a production build.
+
+          next/script with beforeInteractive was tried and is wrong for this —
+          it serialises the code into a queue (self.__next_s.push(...)) that
+          Next's runtime drains after hydration, which is far too late and
+          brings the flash back. Verified by reading the served HTML.
+        */}
         <script
           id="theme-init"
           dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }}
