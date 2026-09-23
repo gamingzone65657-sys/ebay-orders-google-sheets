@@ -17,6 +17,30 @@
  * unrecognised is false rather than assumed.
  */
 
+/**
+ * A non-boolean setting — a credential, a URL, an identifier — with the
+ * wrapping a hosting dashboard tends to leave behind.
+ *
+ * Same reasoning as the boolean reader below, and the same bug: a value
+ * pasted into Vercel as "GOCSPX-…" keeps its quote characters, and a
+ * credential sent to Google or eBay with quotes around it is rejected with an
+ * error that names neither the variable nor the quotes. Returns undefined for
+ * a value that is empty once trimmed, so callers can keep using `??` and
+ * truthiness checks unchanged.
+ */
+export function envValue(
+  name: string,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  const cleaned = raw
+    .trim()
+    .replace(/^(['"])(.*)\1$/s, "$2")
+    .trim();
+  return cleaned === "" ? undefined : cleaned;
+}
+
 const TRUE_VALUES = new Set(["true", "1", "yes", "on", "enabled"]);
 const FALSE_VALUES = new Set(["false", "0", "no", "off", "disabled", ""]);
 

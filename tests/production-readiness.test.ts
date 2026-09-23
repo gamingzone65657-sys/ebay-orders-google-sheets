@@ -588,6 +588,32 @@ describe("environment flag reading", () => {
     assert.match(message, /"ture"/);
   });
 
+  it("strips the quotes a dashboard leaves on a pasted credential", () => {
+    // A client secret sent to Google or eBay with quote characters around it
+    // comes back as invalid_client — an error naming neither the variable nor
+    // the quotes, and indistinguishable from a genuinely wrong secret.
+    const secret = "GOCSPX-abcdefghijklmnopqrstuvwx";
+    for (const raw of [secret, `"${secret}"`, `'${secret}'`, ` ${secret} `, `${secret}\n`]) {
+      assert.equal(
+        env.envValue("GOOGLE_CLIENT_SECRET", { GOOGLE_CLIENT_SECRET: raw }),
+        secret,
+        JSON.stringify(raw),
+      );
+    }
+  });
+
+  it("treats an empty or whitespace-only value as absent", () => {
+    for (const raw of ["", "   ", '""', "''", undefined]) {
+      assert.equal(env.envValue("X", { X: raw }), undefined, JSON.stringify(raw));
+    }
+  });
+
+  it("does not mangle a value that legitimately contains quotes", () => {
+    // Only a matching *surrounding* pair is stripped.
+    assert.equal(env.envValue("X", { X: 'a"b' }), 'a"b');
+    assert.equal(env.envValue("X", { X: '"unbalanced' }), '"unbalanced');
+  });
+
   it("recognises a managed host from the marker the platform injects", () => {
     for (const marker of ["VERCEL", "RENDER", "RAILWAY_ENVIRONMENT", "FLY_APP_NAME", "NETLIFY"]) {
       assert.equal(

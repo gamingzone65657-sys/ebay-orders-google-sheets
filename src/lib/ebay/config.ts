@@ -7,6 +7,8 @@
  * browser bundle.
  */
 
+import { envValue } from "@/lib/env";
+
 export type EbayEnvironment = "SANDBOX" | "PRODUCTION";
 
 export interface EbayEndpoints {
@@ -170,13 +172,14 @@ export function getEbayCredentials(
   assertServer();
 
   const environment = resolveEnvironment(preferredEnvironment);
-  const clientId = process.env.EBAY_CLIENT_ID?.trim();
-  const clientSecret = process.env.EBAY_CLIENT_SECRET?.trim();
+  // Read through envValue, which strips the quotes a hosting dashboard leaves
+  // on a pasted value. eBay answers a quoted Cert ID with invalid_client,
+  // which reads exactly like a wrong credential.
+  const clientId = envValue("EBAY_CLIENT_ID");
+  const clientSecret = envValue("EBAY_CLIENT_SECRET");
   // EBAY_RU_NAME is the correct variable; EBAY_REDIRECT_URI is accepted as a
   // fallback so an existing .env keeps working.
-  const redirectUri = (
-    process.env.EBAY_RU_NAME ?? process.env.EBAY_REDIRECT_URI
-  )?.trim();
+  const redirectUri = envValue("EBAY_RU_NAME") ?? envValue("EBAY_REDIRECT_URI");
 
   if (!clientId || !clientSecret || !redirectUri) return null;
 
@@ -201,9 +204,9 @@ export function isEbayConfigured(): boolean {
 /** Which credential variables are missing, for the settings page hint. */
 export function missingEbayCredentials(): string[] {
   const missing: string[] = [];
-  if (!process.env.EBAY_CLIENT_ID?.trim()) missing.push("EBAY_CLIENT_ID");
-  if (!process.env.EBAY_CLIENT_SECRET?.trim()) missing.push("EBAY_CLIENT_SECRET");
-  if (!process.env.EBAY_RU_NAME?.trim() && !process.env.EBAY_REDIRECT_URI?.trim()) {
+  if (!envValue("EBAY_CLIENT_ID")) missing.push("EBAY_CLIENT_ID");
+  if (!envValue("EBAY_CLIENT_SECRET")) missing.push("EBAY_CLIENT_SECRET");
+  if (!envValue("EBAY_RU_NAME") && !envValue("EBAY_REDIRECT_URI")) {
     missing.push("EBAY_RU_NAME");
   }
   return missing;

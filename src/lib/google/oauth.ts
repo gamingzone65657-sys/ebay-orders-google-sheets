@@ -97,6 +97,25 @@ async function postToken(
     // expired. Either way the user must consent again.
     const expired = payload.error === "invalid_grant" || response.status === 401;
 
+    // invalid_client is a different animal entirely, and reading it as
+    // "try connecting again" wastes an afternoon: the consent succeeded, and
+    // no number of retries will help, because Google rejected the
+    // application's own credentials. Say which variable is wrong.
+    if (payload.error === "invalid_client") {
+      throw new GoogleApiError(
+        GOOGLE_ERROR_CODES.NOT_CONFIGURED,
+        "Google rejected this application's own credentials, so consent could not be completed. " +
+          "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must both come from the same OAuth client, " +
+          "and the secret must be a current one — Google shows a secret in full only when it is created, " +
+          "and rotating it invalidates the old value immediately. Create a new client secret in the Google " +
+          "Cloud console, set it wherever this deployment reads its environment, and redeploy.",
+        {
+          status: response.status,
+          detail: `${payload.error}: ${payload.error_description ?? ""}`.trim(),
+        },
+      );
+    }
+
     throw new GoogleApiError(
       expired
         ? context === "refresh"

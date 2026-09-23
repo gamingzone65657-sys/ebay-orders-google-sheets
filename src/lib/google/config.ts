@@ -6,6 +6,8 @@
  * browser bundle.
  */
 
+import { envValue } from "@/lib/env";
+
 export interface GoogleEndpoints {
   authorize: string;
   token: string;
@@ -114,25 +116,32 @@ function assertServer() {
 }
 
 function defaultRedirectUri(): string {
-  const base = (process.env.APP_URL ?? "http://localhost:3000").replace(
+  const base = (envValue("APP_URL") ?? "http://localhost:3000").replace(
     /\/+$/,
     "",
   );
   return `${base}/api/auth/google/callback`;
 }
 
-/** Returns null (rather than throwing) when the app is not configured. */
+/**
+ * Returns null (rather than throwing) when the app is not configured.
+ *
+ * Read through envValue, which strips the quotes a hosting dashboard leaves
+ * on a pasted value. A client secret sent to Google with quotes around it
+ * comes back as invalid_client — an error that names neither the variable nor
+ * the quotes, and reads exactly like a genuinely wrong secret.
+ */
 export function getGoogleCredentials(): GoogleCredentials | null {
   assertServer();
 
-  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  const clientId = envValue("GOOGLE_CLIENT_ID");
+  const clientSecret = envValue("GOOGLE_CLIENT_SECRET");
   if (!clientId || !clientSecret) return null;
 
   return {
     clientId,
     clientSecret,
-    redirectUri: process.env.GOOGLE_REDIRECT_URI?.trim() || defaultRedirectUri(),
+    redirectUri: envValue("GOOGLE_REDIRECT_URI") ?? defaultRedirectUri(),
     endpoints: GOOGLE_ENDPOINTS,
   };
 }
@@ -143,14 +152,12 @@ export function isGoogleConfigured(): boolean {
 
 export function missingGoogleCredentials(): string[] {
   const missing: string[] = [];
-  if (!process.env.GOOGLE_CLIENT_ID?.trim()) missing.push("GOOGLE_CLIENT_ID");
-  if (!process.env.GOOGLE_CLIENT_SECRET?.trim()) {
-    missing.push("GOOGLE_CLIENT_SECRET");
-  }
+  if (!envValue("GOOGLE_CLIENT_ID")) missing.push("GOOGLE_CLIENT_ID");
+  if (!envValue("GOOGLE_CLIENT_SECRET")) missing.push("GOOGLE_CLIENT_SECRET");
   return missing;
 }
 
 /** Shown on the settings page so the console entry can be copied exactly. */
 export function expectedRedirectUri(): string {
-  return process.env.GOOGLE_REDIRECT_URI?.trim() || defaultRedirectUri();
+  return envValue("GOOGLE_REDIRECT_URI") ?? defaultRedirectUri();
 }
