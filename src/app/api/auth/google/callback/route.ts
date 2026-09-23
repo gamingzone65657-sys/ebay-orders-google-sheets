@@ -16,13 +16,23 @@ import { GOOGLE_OAUTH_STATE_COOKIE } from "@/lib/google/oauth-state";
 import { encryptTokenSet } from "@/lib/google/tokens";
 import { logError, safeMessage } from "@/lib/log";
 import { redactSecretsInText } from "@/lib/mask";
-import { getCurrentUser } from "@/lib/session";
+import {
+  OAUTH_PROVIDERS,
+  consumeOAuthState,
+  describeStateRejection,
+  discardOAuthState,
+} from "@/lib/oauth-store";
 
 export const dynamic = "force-dynamic";
 
-interface StatePayload {
-  state?: string;
-  returnTo?: string;
+/** The raw state cookie, or undefined when the browser did not send one. */
+function readStateCookie(request: Request): string | undefined {
+  return request.headers
+    .get("cookie")
+    ?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${GOOGLE_OAUTH_STATE_COOKIE}=`))
+    ?.slice(GOOGLE_OAUTH_STATE_COOKIE.length + 1);
 }
 
 function redirectWithError(
@@ -73,33 +83,14 @@ export async function GET(request: Request) {
   }
 
   // --- CSRF -----------------------------------------------------------------
-  const rawCookie = request.headers
-    .get("cookie")
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${GOOGLE_OAUTH_STATE_COOKIE}=`))
-    ?.slice(GOOGLE_OAUTH_STATE_COOKIE.length + 1);
-
-  if (!rawCookie) {
-    return redirectWithError(
-      origin,
-      GOOGLE_ERROR_CODES.OAUTH_FAILED,
-      "The authorization session expired before Google redirected back. Start the connection again.",
-    );
-  }
-
-  let statePayload: StatePayload;
-  try {
-    statePayload = JSON.parse(decodeURIComponent(rawCookie)) as StatePayload;
-  } catch {
-    return redirectWithError(
-      origin,
-      GOOGLE_ERROR_CODES.OAUTH_FAILED,
-      "The authorization session could not be read. Start the connection again.",
-    );
-  }
-
-  if (!statePayload.state || !safeEqual(statePayload.state, returnedState)) {
+  // The cookie is a second factor, not the record. When the browser sends one
+  // it has to agree with the state Google returned — a disagreement is the
+  // attack this guard exists for. When it sends none, which is the normal
+  // outcome whenever the callback arrives on a different hostname from the
+  // one that started the flow, the database row is authoritative: it is bound
+  // to a user, single-use, and expires on its own.
+  const cookieState = readStateCookie(request);
+  if (cookieState && !safeEqual(decodeURIComponent(cookieState), returnedState)) {
     return redirectWithError(
       origin,
       GOOGLE_ERROR_CODES.OAUTH_FAILED,
@@ -107,14 +98,26 @@ export async function GET(request: Request) {
     );
   }
 
+  const claim = await consumeOAuthState(OAUTH_PROVIDERS.GOOGLE, returnedState);
+  if (!claim.ok) {
+    return redirectWithError(
+      origin,
+      GOOGLE_ERROR_CODES.OAUTH_FAILED,
+      describeStateRejection(claim.reason),
+    );
+  }
+
   const credentials = getGoogleCredentials();
   if (!credentials) {
+    await discardOAuthState(returnedState);
     return redirectWithError(origin, GOOGLE_ERROR_CODES.NOT_CONFIGURED);
   }
 
   // --- Token exchange -------------------------------------------------------
   try {
-    const user = await getCurrentUser();
+    // The workspace that started the flow, not whoever the current request
+    // happens to resolve to — the state row is what ties the two together.
+    const user = { id: claim.userId };
     const tokens = await exchangeCodeForTokens(credentials, code);
     const encrypted = encryptTokenSet(tokens);
     const now = new Date();
@@ -129,6 +132,7 @@ export async function GET(request: Request) {
         grantsDriveList(granted) ? null : "see your spreadsheet list",
         grantsSheetsRead(granted) ? null : "read spreadsheet contents",
       ].filter(Boolean);
+      await discardOAuthState(returnedState);
       return redirectWithError(
         origin,
         GOOGLE_ERROR_CODES.INSUFFICIENT_SCOPE,
@@ -186,6 +190,9 @@ export async function GET(request: Request) {
       });
     }
   } catch (error) {
+    // The state is spent either way: the authorization code has been offered
+    // to Google and cannot be offered again.
+    await discardOAuthState(returnedState);
     if (error instanceof GoogleApiError) {
       return redirectWithError(
         origin,
@@ -201,7 +208,9 @@ export async function GET(request: Request) {
     );
   }
 
-  const target = new URL(statePayload.returnTo ?? "/google-sheet", origin);
+  await discardOAuthState(returnedState);
+
+  const target = new URL(claim.returnTo || "/google-sheet", origin);
   target.searchParams.set("google", "connected");
   const response = NextResponse.redirect(target);
   response.cookies.delete(GOOGLE_OAUTH_STATE_COOKIE);

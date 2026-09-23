@@ -52,6 +52,24 @@ function requestTimeoutMs(): number {
 export interface EbayRequestOptions {
   /** Path beginning with a slash, e.g. "/sell/fulfillment/v1/order". */
   path: string;
+  /**
+   * Which REST base to use. eBay splits its APIs across two hosts and does
+   * not redirect between them, so the Commerce Identity API has to name
+   * "apiz" explicitly. Everything else, including all order traffic, is
+   * "api". See EbayEndpoints.
+   */
+  host?: "api" | "apiz";
+  /**
+   * Marks a call whose failure is not the connection's failure.
+   *
+   * The identity lookup is decoration: it turns a seller id into a username.
+   * When it fails the connection is still perfectly usable, so the failure is
+   * still logged to EbayApiCall — it is a real event and hiding it would make
+   * the endpoint undebuggable — but it does not overwrite the connection's
+   * lastError, which is what the settings page reads to decide whether eBay
+   * looks broken.
+   */
+  optional?: boolean;
   method?: "GET" | "POST";
   query?: Record<string, string | number | undefined>;
   /**
@@ -128,6 +146,8 @@ async function recordCall(
     errorCode?: string;
     errorMessage?: string;
     ebayErrorId?: number;
+    /** See EbayRequestOptions.optional. */
+    optional?: boolean;
   },
 ): Promise<void> {
   // Observability must never break the request it is observing.
@@ -151,6 +171,11 @@ async function recordCall(
     });
 
     const now = new Date();
+    // A failed optional call is recorded in the log above but leaves the
+    // connection's own health columns alone. Writing lastError there made a
+    // working connection — orders importing, token valid — display a red
+    // "Last error" banner because a cosmetic username lookup had failed.
+    const failedButOptional = !entry.ok && entry.optional === true;
     await prisma.ebayConnection.update({
       where: { id: connectionId },
       data: {
@@ -164,11 +189,13 @@ async function recordCall(
               lastErrorCode: null,
               rateLimitedUntil: null,
             }
-          : {
-              lastError: entry.errorMessage?.slice(0, 500) ?? null,
-              lastErrorCode: entry.errorCode ?? null,
-              lastErrorAt: now,
-            }),
+          : failedButOptional
+            ? {}
+            : {
+                lastError: entry.errorMessage?.slice(0, 500) ?? null,
+                lastErrorCode: entry.errorCode ?? null,
+                lastErrorAt: now,
+              }),
       },
     });
 
@@ -220,8 +247,9 @@ export async function ebayRequest<T>(
     );
   }
 
+  const endpoints = getEndpoints(environment);
   const url = buildUrl(
-    getEndpoints(environment).api,
+    options.host === "apiz" ? endpoints.apiz : endpoints.api,
     options.path,
     options.query,
   );
@@ -285,6 +313,7 @@ export async function ebayRequest<T>(
         attempt,
         errorCode: lastError.code,
         errorMessage: lastError.detail ?? lastError.message,
+        optional: options.optional,
       });
       if (attempt < attemptLimit) {
         await sleep(backoffDelayMs(attempt));
@@ -322,6 +351,7 @@ export async function ebayRequest<T>(
           attempt,
           errorCode: lastError.code,
           errorMessage: lastError.message,
+          optional: options.optional,
         });
         throw lastError;
       }
@@ -358,6 +388,7 @@ export async function ebayRequest<T>(
       errorCode: lastError.code,
       errorMessage: lastError.detail ?? lastError.message,
       ebayErrorId: classified.ebayErrorId,
+      optional: options.optional,
     });
 
     if (classified.code === EBAY_ERROR_CODES.RATE_LIMITED) {

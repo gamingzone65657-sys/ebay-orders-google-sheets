@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
 
-import { randomToken } from "@/lib/crypto";
 import {
   getGoogleCredentials,
   missingGoogleCredentials,
 } from "@/lib/google/config";
 import { buildAuthorizationUrl } from "@/lib/google/oauth";
-import {
-  GOOGLE_OAUTH_STATE_COOKIE,
-  GOOGLE_OAUTH_STATE_TTL_SECONDS,
-} from "@/lib/google/oauth-state";
+import { GOOGLE_OAUTH_STATE_COOKIE } from "@/lib/google/oauth-state";
 import { logError, safeMessage } from "@/lib/log";
+import {
+  OAUTH_PROVIDERS,
+  OAUTH_STATE_TTL_MINUTES,
+  issueOAuthState,
+} from "@/lib/oauth-store";
 import { getCurrentUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -25,9 +26,15 @@ function safeReturnTo(value: string | null): string {
 /**
  * Starts the Google authorization-code flow.
  *
- * The CSRF `state` is generated here, kept in an httpOnly cookie, and
- * compared on the callback. A GET because it is a top-level browser
- * navigation — the user has to land on Google's own consent page.
+ * The CSRF `state` is generated here and recorded against the current user in
+ * the database, because this request and the callback are separate serverless
+ * invocations — see src/lib/oauth-store.ts for why a cookie alone was not
+ * enough. A matching cookie is still set as a second factor, and the callback
+ * rejects one that disagrees; it just no longer *requires* one, which is what
+ * made every attempt fail with "the authorization session expired".
+ *
+ * A GET because it is a top-level browser navigation — the user has to land
+ * on Google's own consent page.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -48,21 +55,24 @@ export async function GET(request: Request) {
       );
     }
 
-    // Ensures a workspace exists before we send the user to Google.
-    await getCurrentUser();
+    const user = await getCurrentUser();
+    const { state } = await issueOAuthState({
+      provider: OAUTH_PROVIDERS.GOOGLE,
+      userId: user.id,
+      returnTo,
+    });
 
-    const state = randomToken(32);
     const response = NextResponse.redirect(
       buildAuthorizationUrl(credentials, state),
     );
     response.cookies.set({
       name: GOOGLE_OAUTH_STATE_COOKIE,
-      value: JSON.stringify({ state, returnTo }),
+      value: state,
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: url.protocol === "https:",
       path: "/",
-      maxAge: GOOGLE_OAUTH_STATE_TTL_SECONDS,
+      maxAge: OAUTH_STATE_TTL_MINUTES * 60,
     });
     return response;
   } catch (error) {

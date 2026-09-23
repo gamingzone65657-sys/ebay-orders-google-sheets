@@ -14,8 +14,19 @@ export interface EbayEndpoints {
   authorize: string;
   /** Token exchange + refresh. */
   token: string;
-  /** REST API base. */
+  /** REST API base: Sell APIs, Fulfillment, everything order-related. */
   api: string;
+  /**
+   * The *other* REST base, for the Commerce Identity API.
+   *
+   * eBay serves getUser from apiz.ebay.com, not api.ebay.com, and does not
+   * redirect between them — api.ebay.com answers /commerce/identity/v1/user/
+   * with a bare 404, which reads as "this endpoint was removed" rather than
+   * "you asked the wrong host". Checked on 23 September 2026: the same path
+   * returns 401 on apiz (route exists, token rejected) and 404 on api, in
+   * both production and sandbox.
+   */
+  apiz: string;
 }
 
 const ENDPOINTS: Record<EbayEnvironment, EbayEndpoints> = {
@@ -23,11 +34,13 @@ const ENDPOINTS: Record<EbayEnvironment, EbayEndpoints> = {
     authorize: "https://auth.sandbox.ebay.com/oauth2/authorize",
     token: "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
     api: "https://api.sandbox.ebay.com",
+    apiz: "https://apiz.sandbox.ebay.com",
   },
   PRODUCTION: {
     authorize: "https://auth.ebay.com/oauth2/authorize",
     token: "https://api.ebay.com/identity/v1/oauth2/token",
     api: "https://api.ebay.com",
+    apiz: "https://apiz.ebay.com",
   },
 };
 

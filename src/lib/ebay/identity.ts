@@ -40,8 +40,14 @@ export async function fetchIdentity(
 ): Promise<EbayIdentity | null> {
   try {
     const response = await ebayRequest<RawIdentity>(connection, {
+      // getUser is served from apiz.ebay.com. api.ebay.com answers this exact
+      // path with a 404 — see EbayEndpoints.apiz.
+      host: "apiz",
       path: "/commerce/identity/v1/user/",
       marketplaceId: connection.marketplaceId,
+      // A username is decoration. Its failure must not make a connection that
+      // is importing orders look broken.
+      optional: true,
     });
 
     const data = response.data ?? {};

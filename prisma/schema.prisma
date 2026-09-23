@@ -48,6 +48,7 @@ model User {
   updatedAt    DateTime  @updatedAt
 
   sessions           Session[]
+  oauthStates        OAuthState[]
   ebayConnections    EbayConnection[]
   googleConnections  GoogleConnection[]
   sheetConfigs       GoogleSheetConfig[]
@@ -73,6 +74,42 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
+}
+
+/// One in-flight OAuth authorization, from "Connect" until the provider
+/// redirects back.
+///
+/// This used to live in a cookie, and on a serverless host that is not
+/// reliable: the start request and the callback are different invocations,
+/// possibly on different instances and — when a deployment is reached by more
+/// than one hostname — different cookie jars. A cookie that never arrives is
+/// indistinguishable from one that expired, which is how a working
+/// configuration came to report "the authorization session expired before
+/// Google redirected back" on every single attempt.
+///
+/// Only the SHA-256 of the state is stored, mirroring Session.tokenHash: the
+/// value in the URL is the secret, and a stolen database row cannot be
+/// replayed as one.
+model OAuthState {
+  id         String    @id @default(cuid())
+  /// "GOOGLE" or "EBAY" — see OAUTH_PROVIDERS.
+  provider   String
+  stateHash  String    @unique
+  userId     String
+  /// Same-origin app path to return to once connected.
+  returnTo   String
+  /// Provider-specific extras as JSON (eBay: marketplace, environment, popup).
+  payload    String?
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  /// Set when redeemed, so a replayed callback is rejected rather than
+  /// spending a second authorization code.
+  consumedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, provider])
   @@index([expiresAt])
 }
 
