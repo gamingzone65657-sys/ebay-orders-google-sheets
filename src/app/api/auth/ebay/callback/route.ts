@@ -11,7 +11,7 @@ import {
 import { EBAY_ERROR_CODES, EbayApiError } from "@/lib/ebay/errors";
 import { fetchIdentity } from "@/lib/ebay/identity";
 import { exchangeCodeForTokens } from "@/lib/ebay/oauth";
-import { OAUTH_STATE_COOKIE } from "@/lib/ebay/oauth-state";
+import { OAUTH_STATE_COOKIE, oauthOutcomeUrl } from "@/lib/ebay/oauth-state";
 import { encryptTokenSet } from "@/lib/ebay/tokens";
 import { logError, safeMessage } from "@/lib/log";
 import { redactSecretsInText } from "@/lib/mask";
@@ -23,18 +23,26 @@ interface StatePayload {
   state?: string;
   marketplaceId?: string;
   environment?: string;
+  popup?: boolean;
 }
 
+/**
+ * Reads the popup flag before the cookie has been validated.
+ *
+ * It only decides *which page* reports the outcome, never whether the
+ * connection is accepted, so trusting it early is safe — and it has to be
+ * read early, because the errors raised before the CSRF check still need
+ * somewhere to land.
+ */
 function redirectWithError(
   origin: string,
   code: string,
   detail?: string,
+  popup = false,
 ): NextResponse {
-  const target = new URL("/settings", origin);
-  target.searchParams.set("ebay_error", code);
-  if (detail) target.searchParams.set("detail", detail.slice(0, 300));
-  target.hash = "ebay";
-  const response = NextResponse.redirect(target);
+  const params: Record<string, string> = { ebay_error: code };
+  if (detail) params.detail = detail.slice(0, 300);
+  const response = NextResponse.redirect(oauthOutcomeUrl(origin, popup, params));
   response.cookies.delete(OAUTH_STATE_COOKIE);
   return response;
 }
@@ -47,9 +55,33 @@ function redirectWithError(
  * both tokens, then store them. The code and tokens never leave this
  * function except as ciphertext.
  */
+/** The raw state cookie, or undefined when the browser did not send one. */
+function readStateCookie(request: Request): string | undefined {
+  return request.headers
+    .get("cookie")
+    ?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${OAUTH_STATE_COOKIE}=`))
+    ?.slice(OAUTH_STATE_COOKIE.length + 1);
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const origin = url.origin;
+
+  // Parsed up front, because every failure below — including the ones that
+  // happen before the CSRF check — needs to know whether it is reporting
+  // into a popup or into the seller's only tab.
+  const rawCookie = readStateCookie(request);
+  let statePayload: StatePayload | null = null;
+  if (rawCookie) {
+    try {
+      statePayload = JSON.parse(decodeURIComponent(rawCookie)) as StatePayload;
+    } catch {
+      statePayload = null;
+    }
+  }
+  const popup = statePayload?.popup === true;
 
   // eBay reports a declined or failed consent as query parameters.
   const oauthError = url.searchParams.get("error");
@@ -60,6 +92,7 @@ export async function GET(request: Request) {
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       description ?? oauthError,
+      popup,
     );
   }
 
@@ -70,33 +103,26 @@ export async function GET(request: Request) {
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       "eBay did not return an authorization code.",
+      popup,
     );
   }
 
   // --- CSRF -----------------------------------------------------------------
-  const rawCookie = request.headers
-    .get("cookie")
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${OAUTH_STATE_COOKIE}=`))
-    ?.slice(OAUTH_STATE_COOKIE.length + 1);
-
   if (!rawCookie) {
     return redirectWithError(
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       "The authorization session expired before eBay redirected back. Start the connection again.",
+      popup,
     );
   }
 
-  let statePayload: StatePayload;
-  try {
-    statePayload = JSON.parse(decodeURIComponent(rawCookie)) as StatePayload;
-  } catch {
+  if (!statePayload) {
     return redirectWithError(
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       "The authorization session could not be read. Start the connection again.",
+      popup,
     );
   }
 
@@ -105,6 +131,7 @@ export async function GET(request: Request) {
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       "The authorization state did not match. The request was rejected.",
+      popup,
     );
   }
 
@@ -113,7 +140,12 @@ export async function GET(request: Request) {
 
   const credentials = getEbayCredentials(environment);
   if (!credentials) {
-    return redirectWithError(origin, EBAY_ERROR_CODES.NOT_CONFIGURED);
+    return redirectWithError(
+      origin,
+      EBAY_ERROR_CODES.NOT_CONFIGURED,
+      undefined,
+      popup,
+    );
   }
 
   // --- Token exchange -------------------------------------------------------
@@ -184,6 +216,7 @@ export async function GET(request: Request) {
         origin,
         error.code,
         redactSecretsInText(hint ?? error.message),
+        popup,
       );
     }
     logError("ebay/callback", error);
@@ -191,13 +224,13 @@ export async function GET(request: Request) {
       origin,
       EBAY_ERROR_CODES.OAUTH_FAILED,
       safeMessage(error, "The authorization could not be completed."),
+      popup,
     );
   }
 
-  const target = new URL("/settings", origin);
-  target.searchParams.set("ebay", "connected");
-  target.hash = "ebay";
-  const response = NextResponse.redirect(target);
+  const response = NextResponse.redirect(
+    oauthOutcomeUrl(origin, popup, { ebay: "connected" }),
+  );
   response.cookies.delete(OAUTH_STATE_COOKIE);
   void connectionId;
   return response;

@@ -7,6 +7,7 @@
  */
 
 import {
+  authorizeEndpoint,
   basicAuthHeader,
   getEbayScopes,
   type EbayCredentials,
@@ -32,12 +33,20 @@ interface RawTokenResponse {
   error_description?: string;
 }
 
-/** Builds the URL the seller is redirected to in order to grant consent. */
+/**
+ * Builds the URL the seller is sent to in order to grant consent.
+ *
+ * `marketplaceId` picks the consent host: a GB seller has to sign in on
+ * ebay.co.uk, not ebay.com. See authorizeEndpoint in config.ts.
+ */
 export function buildAuthorizationUrl(
   credentials: EbayCredentials,
   state: string,
+  marketplaceId?: string | null,
 ): string {
-  const url = new URL(credentials.endpoints.authorize);
+  const url = new URL(
+    authorizeEndpoint(credentials.environment, marketplaceId),
+  );
   url.searchParams.set("client_id", credentials.clientId);
   url.searchParams.set("response_type", "code");
   // For eBay this is the RuName, not a literal URL. See config.ts.

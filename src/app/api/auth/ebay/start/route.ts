@@ -11,6 +11,7 @@ import { buildAuthorizationUrl } from "@/lib/ebay/oauth";
 import {
   OAUTH_STATE_COOKIE,
   OAUTH_STATE_TTL_SECONDS,
+  oauthOutcomeUrl,
 } from "@/lib/ebay/oauth-state";
 import { logError, safeMessage } from "@/lib/log";
 import { getCurrentUser } from "@/lib/session";
@@ -39,18 +40,19 @@ export async function GET(request: Request) {
     requestedMarketplace && VALID_MARKETPLACES.has(requestedMarketplace)
       ? requestedMarketplace
       : "EBAY_US";
+  // Set by the connect button when it opened consent in its own window.
+  const popup = url.searchParams.get("popup") === "1";
 
   // A browser navigation, so a failure comes back as a redirect the seller
   // can read rather than an unhandled throw and a blank 500 page.
   try {
     const credentials = getEbayCredentials(environment);
     if (!credentials) {
-      const missing = missingEbayCredentials().join(", ");
       return NextResponse.redirect(
-        new URL(
-          `/settings?ebay_error=NOT_CONFIGURED&detail=${encodeURIComponent(missing)}#ebay`,
-          url.origin,
-        ),
+        oauthOutcomeUrl(url.origin, popup, {
+          ebay_error: "NOT_CONFIGURED",
+          detail: missingEbayCredentials().join(", "),
+        }),
       );
     }
 
@@ -58,12 +60,17 @@ export async function GET(request: Request) {
     await getCurrentUser();
 
     const state = randomToken(32);
-    const authorizationUrl = buildAuthorizationUrl(credentials, state);
+    // The marketplace decides which eBay site hosts the consent page.
+    const authorizationUrl = buildAuthorizationUrl(
+      credentials,
+      state,
+      marketplaceId,
+    );
 
     const response = NextResponse.redirect(authorizationUrl);
     response.cookies.set({
       name: OAUTH_STATE_COOKIE,
-      value: JSON.stringify({ state, marketplaceId, environment }),
+      value: JSON.stringify({ state, marketplaceId, environment, popup }),
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
@@ -75,12 +82,10 @@ export async function GET(request: Request) {
     logError("ebay/start", error);
     const detail = safeMessage(error, "Could not start the authorization.");
     return NextResponse.redirect(
-      new URL(
-        `/settings?ebay_error=OAUTH_FAILED&detail=${encodeURIComponent(
-          detail.slice(0, 300),
-        )}#ebay`,
-        url.origin,
-      ),
+      oauthOutcomeUrl(url.origin, popup, {
+        ebay_error: "OAUTH_FAILED",
+        detail: detail.slice(0, 300),
+      }),
     );
   }
 }

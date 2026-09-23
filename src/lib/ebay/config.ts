@@ -32,6 +32,62 @@ const ENDPOINTS: Record<EbayEnvironment, EbayEndpoints> = {
 };
 
 /**
+ * Where a seller grants consent, per marketplace.
+ *
+ * eBay does not run one consent page. A British seller signs in on
+ * ebay.co.uk, an Australian seller on ebay.com.au, and sending either to
+ * auth.ebay.com lands them on the wrong sign-in form — the marketplace
+ * selector on the connect screen looked broken for exactly this reason: it
+ * was recorded against the connection but never reached the consent URL.
+ *
+ * The token endpoint is NOT per-marketplace. api.ebay.com issues tokens for
+ * every site, so only the authorize host varies.
+ *
+ * Every hostname here was checked on 23 September 2026 and answered with a
+ * 302 to its sign-in page. Sandbox deliberately has no per-marketplace entry:
+ * auth.sandbox.ebay.co.uk and auth.sandbox.ebay.de do not resolve at all, so
+ * every sandbox consent goes to auth.sandbox.ebay.com.
+ */
+const PRODUCTION_CONSENT_HOSTS: Record<string, string> = {
+  EBAY_US: "auth.ebay.com",
+  EBAY_GB: "auth.ebay.co.uk",
+  EBAY_DE: "auth.ebay.de",
+  EBAY_AU: "auth.ebay.com.au",
+  EBAY_CA: "auth.ebay.ca",
+  EBAY_FR: "auth.ebay.fr",
+  EBAY_IT: "auth.ebay.it",
+  EBAY_ES: "auth.ebay.es",
+  EBAY_IE: "auth.ebay.ie",
+  EBAY_AT: "auth.ebay.at",
+  EBAY_CH: "auth.ebay.ch",
+  EBAY_BE: "auth.befr.ebay.be",
+  EBAY_NL: "auth.ebay.nl",
+  EBAY_PL: "auth.ebay.pl",
+  EBAY_HK: "auth.ebay.com.hk",
+  EBAY_SG: "auth.ebay.com.sg",
+  EBAY_MY: "auth.ebay.com.my",
+  EBAY_PH: "auth.ebay.ph",
+  EBAY_IN: "auth.ebay.in",
+};
+
+/**
+ * The consent URL for one marketplace, falling back to the environment's
+ * default host when the marketplace is unknown.
+ *
+ * Falling back rather than throwing is deliberate: an unrecognised
+ * marketplace id should still let the seller connect on eBay's main site,
+ * which is strictly better than a 500 on the connect button.
+ */
+export function authorizeEndpoint(
+  environment: EbayEnvironment,
+  marketplaceId?: string | null,
+): string {
+  if (environment === "SANDBOX") return ENDPOINTS.SANDBOX.authorize;
+  const host = PRODUCTION_CONSENT_HOSTS[(marketplaceId ?? "").toUpperCase()];
+  return host ? `https://${host}/oauth2/authorize` : ENDPOINTS.PRODUCTION.authorize;
+}
+
+/**
  * Scopes requested at consent time.
  *
  * `sell.fulfillment.readonly` covers getOrders and getShippingFulfillments,
@@ -148,14 +204,35 @@ export function basicAuthHeader(credentials: EbayCredentials): string {
   return `Basic ${encoded}`;
 }
 
-/** Marketplaces the connect screen offers. eBay accepts many more. */
+/**
+ * Marketplaces the connect screen offers.
+ *
+ * This list is exactly the set with a consent host in
+ * PRODUCTION_CONSENT_HOSTS above. Offering a marketplace with no consent host
+ * would silently send the seller to auth.ebay.com — the very bug this pairing
+ * exists to prevent — so the two are kept in step by the test suite.
+ */
 export const EBAY_MARKETPLACE_OPTIONS = [
-  { id: "EBAY_US", label: "United States" },
-  { id: "EBAY_GB", label: "United Kingdom" },
-  { id: "EBAY_DE", label: "Germany" },
-  { id: "EBAY_AU", label: "Australia" },
-  { id: "EBAY_CA", label: "Canada" },
-  { id: "EBAY_FR", label: "France" },
-  { id: "EBAY_IT", label: "Italy" },
-  { id: "EBAY_ES", label: "Spain" },
+  { id: "EBAY_US", label: "United States (ebay.com)" },
+  { id: "EBAY_GB", label: "United Kingdom (ebay.co.uk)" },
+  { id: "EBAY_DE", label: "Germany (ebay.de)" },
+  { id: "EBAY_AU", label: "Australia (ebay.com.au)" },
+  { id: "EBAY_CA", label: "Canada (ebay.ca)" },
+  { id: "EBAY_FR", label: "France (ebay.fr)" },
+  { id: "EBAY_IT", label: "Italy (ebay.it)" },
+  { id: "EBAY_ES", label: "Spain (ebay.es)" },
+  { id: "EBAY_IE", label: "Ireland (ebay.ie)" },
+  { id: "EBAY_AT", label: "Austria (ebay.at)" },
+  { id: "EBAY_CH", label: "Switzerland (ebay.ch)" },
+  { id: "EBAY_BE", label: "Belgium (befr.ebay.be)" },
+  { id: "EBAY_NL", label: "Netherlands (ebay.nl)" },
+  { id: "EBAY_PL", label: "Poland (ebay.pl)" },
+  { id: "EBAY_IN", label: "India (ebay.in)" },
+  { id: "EBAY_HK", label: "Hong Kong (ebay.com.hk)" },
+  { id: "EBAY_SG", label: "Singapore (ebay.com.sg)" },
+  { id: "EBAY_MY", label: "Malaysia (ebay.com.my)" },
+  { id: "EBAY_PH", label: "Philippines (ebay.ph)" },
 ] as const;
+
+/** Exported for the test that keeps the two lists in step. */
+export const EBAY_CONSENT_HOSTS = PRODUCTION_CONSENT_HOSTS;
