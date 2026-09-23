@@ -41,6 +41,9 @@ describe("production readiness", () => {
       EBAY_RU_NAME: "Acme-AcmeApp-PRD-1a2b3c4d5-6e7f8g9h",
       CRON_SECRET: "c",
       DATABASE_URL: "postgresql://localhost/app",
+      // Closed by default here so "fully configured" means one seller's
+      // deployment. The open-registration warning is asserted on its own.
+      ALLOW_REGISTRATION: "false",
       ...overrides,
     } as NodeJS.ProcessEnv;
     return check();
@@ -74,10 +77,21 @@ describe("production readiness", () => {
     );
   });
 
-  it("warns loudly when authentication is switched off", () => {
+  it("tells an operator that SINGLE_USER_MODE is now inert", () => {
+    // It used to make every visitor the workspace owner. It no longer does
+    // anything in production, and an operator who set it back when it was
+    // load-bearing needs to hear that rather than assume either way.
     const findings = production({ SINGLE_USER_MODE: "true" });
     assert.ok(
-      findings.some((f) => /without authentication/i.test(f.title)),
+      findings.some((f) => /ignored in production/i.test(f.title)),
+      JSON.stringify(findings),
+    );
+  });
+
+  it("warns when anyone can create an account", () => {
+    const findings = production({ ALLOW_REGISTRATION: undefined });
+    assert.ok(
+      findings.some((f) => /create an account/i.test(f.title)),
       JSON.stringify(findings),
     );
   });
@@ -114,15 +128,122 @@ describe("edge guards", () => {
 
   function request(
     url: string,
-    init: { method?: string; origin?: string; host?: string; ip?: string } = {},
+    init: {
+      method?: string;
+      origin?: string;
+      host?: string;
+      ip?: string;
+      /**
+       * Whether the browser carries a session cookie. Defaults to true: the
+       * CSRF and rate-limit cases are about an *authenticated* request being
+       * abused, and without a cookie they would all stop at the auth gate
+       * before reaching the guard under test.
+       */
+      session?: boolean;
+    } = {},
   ) {
     const headers = new Headers();
     if (init.origin) headers.set("origin", init.origin);
     headers.set("host", init.host ?? "sync.example.com");
     // A distinct IP per test keeps the rate limiter from bleeding across cases.
     headers.set("x-forwarded-for", init.ip ?? Math.random().toString(36));
+    if (init.session !== false) {
+      headers.set("cookie", "ebs_session=a-token-shaped-value");
+    }
     return new NextRequest(url, { method: init.method ?? "GET", headers });
   }
+
+  /* --- Authentication gate ------------------------------------------------ */
+
+  it("redirects an unauthenticated page request to the sign-in screen", () => {
+    const response = middleware(
+      request("https://sync.example.com/dashboard", { session: false }),
+    );
+    assert.equal(response.status, 307);
+    const location = new URL(response.headers.get("location") ?? "");
+    assert.equal(location.pathname, "/login");
+    assert.equal(location.searchParams.get("next"), "/dashboard");
+  });
+
+  it("answers an unauthenticated API request with 401 and no data", async () => {
+    const response = middleware(
+      request("https://sync.example.com/api/settings", { session: false }),
+    );
+    assert.equal(response.status, 401);
+    const body = (await response.json()) as {
+      code: string;
+      success: boolean;
+      data?: unknown;
+    };
+    assert.equal(body.code, "AUTH_REQUIRED");
+    assert.equal(body.success, false);
+    assert.equal(body.data, undefined);
+  });
+
+  it("protects mutations as well as reads", async () => {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      const response = middleware(
+        request("https://sync.example.com/api/sync", {
+          method,
+          origin: "https://sync.example.com",
+          session: false,
+        }),
+      );
+      assert.equal(response.status, 401, method);
+    }
+  });
+
+  it("protects a route nobody remembered to list", () => {
+    // The gate denies by default: a page added later is covered without
+    // anyone editing the middleware.
+    const response = middleware(
+      request("https://sync.example.com/some/future/page", { session: false }),
+    );
+    assert.equal(response.status, 307);
+  });
+
+  it("leaves the pages that must work without a session alone", () => {
+    for (const path of [
+      "/login",
+      "/register",
+      "/privacy-policy",
+      "/api/auth/login",
+      "/api/auth/register",
+      // eBay calls this server-to-server with no session at all.
+      "/api/ebay/marketplace-account-deletion",
+      // Operator endpoints, authenticated by CRON_SECRET instead.
+      "/api/health",
+      "/api/jobs/tick",
+    ]) {
+      const response = middleware(
+        request(`https://sync.example.com${path}`, { session: false }),
+      );
+      assert.notEqual(response.status, 401, path);
+      assert.notEqual(response.status, 307, path);
+    }
+  });
+
+  it("does not treat the OAuth routes as public", () => {
+    // They attach a seller's connected account to a workspace, so they need
+    // to know which. A browser is navigating, so they get the redirect a page
+    // gets rather than a raw 401 JSON body on screen mid-connect.
+    for (const path of [
+      "/api/auth/ebay/callback",
+      "/api/auth/google/callback",
+      "/api/auth/ebay/start",
+      "/api/auth/google/start",
+    ]) {
+      const response = middleware(
+        request(`https://sync.example.com${path}`, { session: false }),
+      );
+      assert.equal(response.status, 307, path);
+      const location = new URL(response.headers.get("location") ?? "");
+      assert.equal(location.pathname, "/login", path);
+      // The authorization code is single-use and stale by the time anyone
+      // signs in, so there is nothing to resume.
+      assert.equal(location.searchParams.get("next"), null, path);
+    }
+  });
 
   it("lets a same-origin mutation through", () => {
     const response = middleware(
@@ -266,15 +387,23 @@ describe("authentication", () => {
     );
   });
 
-  it("allows the fallback only when explicitly opted into", async () => {
+  it("still refuses when SINGLE_USER_MODE is set", async () => {
+    // This used to be the opt-in that made production usable, and it is
+    // exactly how one workspace came to be served to every browser that
+    // reached the URL. No value may bring it back.
     Object.defineProperty(process.env, "NODE_ENV", {
       value: "production",
       configurable: true,
     });
-    process.env.SINGLE_USER_MODE = "true";
 
-    const user = await session.getCurrentUser();
-    assert.ok(user.id);
+    for (const value of ["true", "TRUE", '"true"', "1", "yes", "on"]) {
+      process.env.SINGLE_USER_MODE = value;
+      await assert.rejects(
+        () => session.getCurrentUser(),
+        (error: unknown) => error instanceof session.AuthRequiredError,
+        `SINGLE_USER_MODE=${JSON.stringify(value)} must not admit an anonymous request`,
+      );
+    }
   });
 
   it("answers an unauthenticated API call with 401 JSON, not a 500", async () => {
@@ -491,56 +620,40 @@ describe("single-user mode gate", () => {
     process.env = { ...saved };
   });
 
-  function production(value: string | undefined) {
+  function withEnv(nodeEnv: string, value: string | undefined) {
     Object.defineProperty(process.env, "NODE_ENV", {
-      value: "production",
+      value: nodeEnv,
       configurable: true,
     });
     if (value === undefined) delete process.env.SINGLE_USER_MODE;
     else process.env.SINGLE_USER_MODE = value;
   }
 
-  it("admits a request for every spelling a dashboard produces", async () => {
-    for (const raw of ["true", '"true"', " true ", "TRUE", "1", "yes"]) {
-      production(raw);
-      const user = await session.getCurrentUser();
-      assert.ok(user.id, `expected ${JSON.stringify(raw)} to allow access`);
+  it("admits nobody in production, whatever it is set to", async () => {
+    // Every spelling a hosting dashboard produces. None of them may work:
+    // this variable used to be the only thing standing between a visitor and
+    // the seller's connected eBay account, and now it is not consulted at all.
+    for (const raw of ["true", '"true"', " true ", "TRUE", "1", "yes", undefined, "false"]) {
+      withEnv("production", raw);
+      await assert.rejects(
+        () => session.getCurrentUser(),
+        (error: unknown) => error instanceof session.AuthRequiredError,
+        `SINGLE_USER_MODE=${JSON.stringify(raw)} must not admit an anonymous request`,
+      );
     }
   });
 
-  it("still refuses when the variable never arrived", async () => {
-    production(undefined);
+  it("still resolves the owner in development, where there is no login", async () => {
+    withEnv("development", undefined);
+    const user = await session.getCurrentUser();
+    assert.ok(user.id);
+  });
+
+  it("can be switched off in development too", async () => {
+    withEnv("development", "false");
     await assert.rejects(
       () => session.getCurrentUser(),
       (error: unknown) => error instanceof session.AuthRequiredError,
-    );
-  });
-
-  it("still refuses when it is explicitly disabled", async () => {
-    production("false");
-    await assert.rejects(() => session.getCurrentUser());
-  });
-
-  it("tells the operator what the process actually sees", async () => {
-    production(undefined);
-    await assert.rejects(
-      () => session.getCurrentUser(),
-      (error: unknown) => {
-        const message = (error as Error).message;
-        // The old message just repeated the instruction, which is useless to
-        // someone who has already followed it.
-        assert.match(message, /not set in this running process/);
-        return true;
-      },
-    );
-
-    production("ture");
-    await assert.rejects(
-      () => session.getCurrentUser(),
-      (error: unknown) => {
-        assert.match((error as Error).message, /"ture"/);
-        return true;
-      },
     );
   });
 });

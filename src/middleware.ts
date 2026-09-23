@@ -24,6 +24,89 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+/* -------------------------------------------------------------------------- */
+/* Authentication gate                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The session cookie's name, duplicated from lib/auth.ts.
+ *
+ * Middleware runs on the Edge runtime, which cannot load node:crypto — and
+ * lib/auth.ts imports it. Importing that module here would pull the whole
+ * Prisma client into the Edge bundle and fail the build, so the one constant
+ * this file needs is repeated instead. A test asserts the two agree.
+ */
+const SESSION_COOKIE = "ebs_session";
+
+/**
+ * Paths reachable without a session.
+ *
+ * Everything not listed here requires one. That direction matters: a new page
+ * added later is protected by default, whereas an allow-everything list with
+ * exceptions leaks every route somebody forgets to add.
+ *
+ * The OAuth callbacks are NOT public. They identify the workspace from the
+ * signed-in session and the single-use state row issued to it, and an
+ * unauthenticated callback has no workspace to attach a connection to.
+ */
+const PUBLIC_PREFIXES = [
+  "/login",
+  "/register",
+  "/privacy-policy",
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/register",
+  // eBay posts account-deletion notifications server-to-server. It has no
+  // session and must not need one; the endpoint proves itself by hashing a
+  // shared verification token instead.
+  "/api/ebay/marketplace-account-deletion",
+  // Operator endpoint, authenticated by CRON_SECRET rather than a session.
+  "/api/health",
+  "/api/jobs/tick",
+];
+
+function isPublic(pathname: string): boolean {
+  if (pathname === "/") return true;
+  return PUBLIC_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
+/**
+ * Protected routes under /api that a *browser* navigates to rather than
+ * fetches.
+ *
+ * They still require a session — they attach a seller's connected account to
+ * a workspace, so they have to know which — but refusing them with 401 JSON
+ * would put a raw error object on screen in the middle of connecting. They
+ * get the same redirect a page does, and the seller signs in and starts the
+ * connection again.
+ */
+const BROWSER_NAVIGATED_API = ["/api/auth/ebay/", "/api/auth/google/"];
+
+function isBrowserNavigation(pathname: string): boolean {
+  return (
+    !pathname.startsWith("/api/") ||
+    BROWSER_NAVIGATED_API.some((prefix) => pathname.startsWith(prefix))
+  );
+}
+
+/**
+ * Whether the middleware should refuse this request outright.
+ *
+ * It only checks that a session cookie is *present*. Whether the token is
+ * valid is decided by getCurrentUser() against the database, which the Edge
+ * runtime cannot reach — so this is a cheap first gate that turns the common
+ * case (no cookie at all) into a redirect or a 401 without running the page,
+ * and never the only check. Every route still resolves its data through
+ * getCurrentUser(), which throws AuthRequiredError for a forged or expired
+ * token even though the cookie was present here.
+ */
+function hasSessionCookie(request: NextRequest): boolean {
+  const value = request.cookies.get(SESSION_COOKIE)?.value;
+  return typeof value === "string" && value.length > 0;
+}
+
 /** Mutating routes a browser is *expected* to reach cross-origin. */
 const CSRF_EXEMPT = [
   // Platform cron calls this server-to-server with no Origin, and it carries
@@ -126,6 +209,31 @@ export function middleware(request: NextRequest) {
       429,
       { "retry-after": String(retryAfter) },
     );
+  }
+
+  // --- Authentication -------------------------------------------------------
+  if (!isPublic(pathname) && !hasSessionCookie(request)) {
+    if (!isBrowserNavigation(pathname)) {
+      return json(
+        {
+          ok: false,
+          success: false,
+          error: "Sign in to continue.",
+          code: "AUTH_REQUIRED",
+        },
+        401,
+      );
+    }
+    // Carry the destination so signing in resumes where the user was headed,
+    // as a path only — an absolute URL here would be an open redirect. An
+    // OAuth callback is not worth resuming: its authorization code is
+    // single-use and will have expired by the time anyone signs in.
+    const login = new URL("/login", request.url);
+    const target = pathname + (request.nextUrl.search || "");
+    if (target !== "/" && !pathname.startsWith("/api/")) {
+      login.searchParams.set("next", target);
+    }
+    return NextResponse.redirect(login);
   }
 
   if (!MUTATING.has(request.method)) return NextResponse.next();

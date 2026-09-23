@@ -7,21 +7,18 @@
 
 export const OAUTH_STATE_COOKIE = "ebay_oauth_state";
 
-/** The consent round trip should complete well inside this. */
-export const OAUTH_STATE_TTL_SECONDS = 600;
-
+/**
+ * What the start route records alongside the state, in OAuthState.payload.
+ *
+ * It travels with the state row rather than the query string because the
+ * callback needs it before it decides anything, and eBay returns only the
+ * parameters it was given — a query parameter added to the start URL never
+ * survives the round trip.
+ */
 export interface OAuthStatePayload {
-  state: string;
   marketplaceId: string;
   environment: "SANDBOX" | "PRODUCTION";
-  /**
-   * True when consent was opened in a separate window.
-   *
-   * It rides in the cookie rather than the query string because the callback
-   * has to know before it decides where to send the browser, and eBay only
-   * returns the parameters it was given — a query parameter added to the
-   * start URL never survives the round trip.
-   */
+  /** True when consent was opened in a separate window. */
   popup?: boolean;
 }
 

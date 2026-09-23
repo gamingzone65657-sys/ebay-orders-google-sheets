@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
-import { randomToken } from "@/lib/crypto";
+import {
+  OAUTH_PROVIDERS,
+  OAUTH_STATE_TTL_MINUTES,
+  issueOAuthState,
+} from "@/lib/oauth-store";
 import {
   EBAY_MARKETPLACE_OPTIONS,
   getEbayCredentials,
@@ -8,11 +12,7 @@ import {
   resolveEnvironment,
 } from "@/lib/ebay/config";
 import { buildAuthorizationUrl } from "@/lib/ebay/oauth";
-import {
-  OAUTH_STATE_COOKIE,
-  OAUTH_STATE_TTL_SECONDS,
-  oauthOutcomeUrl,
-} from "@/lib/ebay/oauth-state";
+import { OAUTH_STATE_COOKIE, oauthOutcomeUrl } from "@/lib/ebay/oauth-state";
 import { logError, safeMessage } from "@/lib/log";
 import { getCurrentUser } from "@/lib/session";
 
@@ -56,10 +56,17 @@ export async function GET(request: Request) {
       );
     }
 
-    // Ensures a workspace exists before we send the seller to eBay.
-    await getCurrentUser();
+    // The consent belongs to whoever is signed in right now. Recording that
+    // against the state is what stops a callback attaching one seller's eBay
+    // account to a different workspace.
+    const user = await getCurrentUser();
+    const { state } = await issueOAuthState({
+      provider: OAUTH_PROVIDERS.EBAY,
+      userId: user.id,
+      returnTo: "/settings",
+      payload: { marketplaceId, environment, popup },
+    });
 
-    const state = randomToken(32);
     // The marketplace decides which eBay site hosts the consent page.
     const authorizationUrl = buildAuthorizationUrl(
       credentials,
@@ -68,14 +75,17 @@ export async function GET(request: Request) {
     );
 
     const response = NextResponse.redirect(authorizationUrl);
+    // A second factor only. The state row above is the record; this cookie
+    // lets the callback reject a state that disagrees with what this browser
+    // started, and its absence is not itself a failure — see oauth-store.ts.
     response.cookies.set({
       name: OAUTH_STATE_COOKIE,
-      value: JSON.stringify({ state, marketplaceId, environment, popup }),
+      value: state,
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: url.protocol === "https:",
       path: "/",
-      maxAge: OAUTH_STATE_TTL_SECONDS,
+      maxAge: OAUTH_STATE_TTL_MINUTES * 60,
     });
     return response;
   } catch (error) {

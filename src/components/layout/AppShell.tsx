@@ -8,6 +8,8 @@ import { Menu, X } from "lucide-react";
 
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 
+import { SignOutButton } from "@/components/auth/SignOutButton";
+
 import { NAV_ITEMS, navItemForPath } from "./nav";
 
 interface AppShellProps {
@@ -102,6 +104,8 @@ export function AppShell({
               </p>
             </div>
           </div>
+
+          <SignOutButton />
 
           {/* Public page, reachable without a session — eBay and Google both
               require the policy to be readable by anyone. */}

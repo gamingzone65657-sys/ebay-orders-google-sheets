@@ -6,7 +6,9 @@ import { isGoogleConfigured, expectedRedirectUri } from "@/lib/google/config";
 import { JOB_HEARTBEAT_TIMEOUT_MS } from "@/lib/constants";
 import { checkProductionReadiness } from "@/lib/production-check";
 import { readFlag } from "@/lib/env";
+import { registrationOpen } from "@/lib/registration";
 import { retentionSettings } from "@/lib/retention";
+import { anonymousFallbackAllowed } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -134,6 +136,9 @@ export async function GET(request: Request) {
 
     // --- Configuration ----------------------------------------------------
     const singleUser = readFlag("SINGLE_USER_MODE");
+    const accountsWithPassword = database.connected
+      ? await prisma.user.count({ where: { passwordHash: { not: null } } })
+      : 0;
     const findings = checkProductionReadiness();
     const blockers = findings.filter((f) => f.severity === "blocker");
     const appUrl = process.env.APP_URL?.trim() ?? "";
@@ -163,10 +168,15 @@ export async function GET(request: Request) {
         appUrlIsLocalhost: /localhost|127\.0\.0\.1/i.test(appUrl),
         authSecretConfigured:
           (process.env.AUTH_SECRET ?? "").length >= 32,
-        // verdict distinguishes "never reached the runtime" from "arrived
-        // with a value nobody meant", which is the whole diagnosis.
-        singleUserMode: singleUser.enabled,
+        // Reported as "set", not as "in effect": production ignores it.
+        singleUserModeVariableSet: singleUser.enabled,
         singleUserModeVerdict: singleUser.verdict,
+        // What actually decides whether an anonymous request is served.
+        anonymousAccessAllowed: anonymousFallbackAllowed(),
+        registrationOpen: registrationOpen(),
+        // Zero means nobody can sign in — the deployment is locked out of
+        // itself, which is the one authentication state worth alarming on.
+        accountsWithPassword,
       },
       worker,
       scheduler,

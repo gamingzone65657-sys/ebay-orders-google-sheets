@@ -8,6 +8,7 @@
  */
 
 import { readFlag } from "./env";
+import { registrationOpen } from "./registration";
 
 const MIN_SECRET_LENGTH = 32;
 
@@ -34,12 +35,26 @@ export function checkProductionReadiness(): ReadinessFinding[] {
   if (!isProduction()) return findings;
 
   // --- Authentication ------------------------------------------------------
+  // SINGLE_USER_MODE no longer does anything in production — getCurrentUser()
+  // refuses an anonymous request before it reads any variable. It is reported
+  // so an operator who set it during the period when it *was* load-bearing
+  // learns it is now inert, rather than assuming it is still holding the door
+  // open and being surprised either way.
   if (isTrue(process.env.SINGLE_USER_MODE)) {
     findings.push({
       severity: "warning",
-      title: "Running without authentication (SINGLE_USER_MODE)",
+      title: "SINGLE_USER_MODE is set but ignored in production",
       detail:
-        "Every request resolves to the workspace owner. Only safe on a host that is not reachable by anyone else — behind a VPN, a reverse proxy that authenticates, or bound to localhost.",
+        "It used to make every request resolve to the workspace owner, which meant any visitor saw the seller's connected accounts. Production now requires a real session, so this variable has no effect and can be removed.",
+    });
+  }
+
+  if (registrationOpen()) {
+    findings.push({
+      severity: "warning",
+      title: "Anyone can create an account",
+      detail:
+        "New accounts get their own empty workspace and cannot see existing data, but a deployment run for one seller should still set ALLOW_REGISTRATION=false to keep the public surface small.",
     });
   }
 

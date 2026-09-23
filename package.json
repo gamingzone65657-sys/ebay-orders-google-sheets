@@ -16,6 +16,7 @@
     "db:push": "node scripts/prepare-schema.mjs && prisma db push --schema prisma/schema.active.prisma",
     "db:deploy": "node scripts/prepare-schema.mjs && prisma db push --schema prisma/schema.active.prisma --skip-generate",
     "db:audit": "tsx scripts/audit-database.ts",
+    "auth:set-password": "tsx scripts/set-password.ts",
     "vercel:env": "node scripts/vercel-env.mjs",
     "db:reset": "prisma db push --force-reset",
     "db:studio": "prisma studio",
